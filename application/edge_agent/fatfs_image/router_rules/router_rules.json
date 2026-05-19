@@ -39,20 +39,52 @@
       "event_type": "message",
       "event_key": "text",
       "content_type": "text",
-      "text": "/new"
+      "text": "/new",
+      "text_match_rule": "prefix"
     },
     "actions": [
       {
         "type": "call_cap",
-        "cap": "roll_chat_session",
-        "input": {}
+        "cap": "new_chat_session",
+        "input": {
+          "alias": "{{match.remainder}}"
+        }
       },
       {
         "type": "send_message",
         "input": {
           "channel": "{{event.source_channel}}",
-          "chat_id": "{{event.chat_id}}",
-          "message": "Started a new session."
+          "chat_id": "{{event.chat_id}}"
+        }
+      }
+    ]
+  },
+  {
+    "id": "im_switch_session",
+    "description": "List or switch persistent chat sessions when the user sends /switch.",
+    "enabled": true,
+    "consume_on_match": true,
+    "ack": "{{event.source_channel}} session switch handled",
+    "match": {
+      "event_type": "message",
+      "event_key": "text",
+      "content_type": "text",
+      "text": "/switch",
+      "text_match_rule": "prefix"
+    },
+    "actions": [
+      {
+        "type": "call_cap",
+        "cap": "switch_chat_session",
+        "input": {
+          "alias": "{{match.remainder}}"
+        }
+      },
+      {
+        "type": "send_message",
+        "input": {
+          "channel": "{{event.source_channel}}",
+          "chat_id": "{{event.chat_id}}"
         }
       }
     ]
