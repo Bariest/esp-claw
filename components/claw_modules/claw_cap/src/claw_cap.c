@@ -12,6 +12,7 @@
 
 #include "cJSON.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -364,7 +365,9 @@ esp_err_t claw_cap_call_from_core(const char *cap_name,
     }
     *out_output = NULL;
 
-    output = calloc(1, output_size);
+    output = heap_caps_calloc_prefer(1, output_size, 2,
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!output) {
         return ESP_ERR_NO_MEM;
     }
