@@ -34,7 +34,7 @@ idf_component_register(
 
 set(CLAW_GIT_VERSION "unknown")
 execute_process(
-    COMMAND git -C "${CMAKE_CURRENT_LIST_DIR}/../../.." describe --always --tags --dirty "--match=claw-v*.*"
+    COMMAND git -C "${CMAKE_CURRENT_LIST_DIR}/../../.." describe --always --tags --dirty
     OUTPUT_VARIABLE CLAW_GIT_VERSION
     ERROR_QUIET
     OUTPUT_STRIP_TRAILING_WHITESPACE
