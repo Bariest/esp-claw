@@ -9,13 +9,28 @@ const WIFI_STATUS_PROBE_ATTEMPTS = 3;
 const WIFI_STATUS_PROBE_WAIT_MS = 1000;
 const WIFI_STATUS_PROBE_RETRY_GAP_MS = 3000;
 
-type FirmwareBinaryLinks = Record<string, string>;
+type FirmwareBinaryAsset =
+  | string
+  | {
+      bin?: string;
+      gzip?: string;
+    };
+
+type FirmwareBinaryLinks = Record<string, FirmwareBinaryAsset>;
+type FirmwareDownloadSource = {
+  url: string;
+  compression: "gzip" | "none";
+};
 
 type FirmwareRecord = {
   description?: string;
   merged_binary: FirmwareBinaryLinks;
   min_flash_size?: number;
   min_psram_size?: number;
+  nvs_info?: {
+    start_addr?: string;
+    size?: string;
+  };
 };
 
 type FirmwareBoards = Record<string, FirmwareRecord>;
@@ -36,6 +51,10 @@ type Strings = {
   chooseBrandLabel: string;
   chooseBoardLabel: string;
   chooseConsoleOutputLabel: string;
+  preserveConfigLabel: string;
+  preserveConfigHint: string;
+  preserveConfigKeep: string;
+  preserveConfigOverwrite: string;
   chooseChipPlaceholder: string;
   chooseBrandPlaceholder: string;
   chooseConsoleOutputPlaceholder: string;
@@ -176,6 +195,7 @@ const els = {
   brandSelect: must<HTMLSelectElement>("brand-select"),
   boardSelect: must<HTMLSelectElement>("board-select"),
   consoleOutputSelect: must<HTMLSelectElement>("console-output-select"),
+  preserveConfigSelect: must<HTMLSelectElement>("preserve-config-select"),
   selectedBoardName: must("selected-board-name"),
   selectedBoardDesc: must("selected-board-desc"),
   selectedBoardMeta: must("selected-board-meta"),
@@ -258,6 +278,7 @@ const state = {
   selectedBrand: null as string | null,
   selectedBoardId: null as string | null,
   selectedConsoleOutput: null as string | null,
+  preserveConfig: false,
   visibleBoards: [] as VisibleBoard[],
   detectedConsoleOutput: null as DetectedConsoleOutput,
   readyIp: null as string | null,
@@ -302,6 +323,7 @@ async function init() {
   refreshBoards();
   renderActionState();
   renderConsole();
+  els.preserveConfigSelect.value = state.preserveConfig ? "keep" : "overwrite";
 
   els.chipSelect.addEventListener("change", () => {
     state.selectedChip = els.chipSelect.value || null;
@@ -325,6 +347,9 @@ async function init() {
     state.selectedConsoleOutput = els.consoleOutputSelect.value || null;
     renderSelectedBoard();
     renderActionState();
+  });
+  els.preserveConfigSelect.addEventListener("change", () => {
+    state.preserveConfig = els.preserveConfigSelect.value !== "overwrite";
   });
 
   els.connectBtn.addEventListener("click", () => {
@@ -648,6 +673,7 @@ function getVisibleConsoleOutputKeys(firmware: FirmwareRecord | null) {
   }
 
   return Object.keys(firmware.merged_binary)
+    .filter((consoleOutput) => Boolean(normalizeFirmwareBinaryAsset(firmware.merged_binary[consoleOutput])))
     .filter((consoleOutput) => isConsoleOutputVisibleForCurrentDevice(consoleOutput))
     .sort(compareConsoleOutputKey);
 }
@@ -1024,7 +1050,11 @@ async function flashSelectedFirmware() {
 
     state.flash = "flashing";
     updateModalProgress(s.writingFlash, 0);
-    addProgressLine(`Flashing ${selected.boardKey} from 0x0`);
+    addProgressLine(
+      state.preserveConfig
+        ? `Flashing ${selected.boardKey} with config retention`
+        : `Flashing ${selected.boardKey} from 0x0`,
+    );
 
     const loader = state.loader;
     let fastBaudForFlash = false;
@@ -1037,28 +1067,10 @@ async function flashSelectedFirmware() {
       }
     }
 
-    let lastWritePct = 0;
     try {
-      await loader.flashData(binary, (written, total) => {
-        const pct = total > 0 ? Math.round((written / total) * 100) : 0;
-        lastWritePct = pct;
+      await flashBinaryWithConfigPolicy(loader, selected.firmware, binary, (pct) => {
         updateModalProgress(s.writingFlash, pct);
-      }, 0x0, true);
-    } catch (flashError) {
-      // On ESP32-P4 (and some other chips) via UART, the stub does not respond
-      // to the ESP_FLASH_BEGIN(0,0) finalization command after a large compressed
-      // write, causing a "Timed out waiting for packet header" error even though
-      // all data blocks were written successfully.  The post-flash reset is done
-      // via hardware DTR/RTS signals and does not rely on flashDeflFinish, so it
-      // is safe to continue the post-flash flow when this specific condition is met.
-      const isFinalizeTimeout =
-        lastWritePct >= 100 &&
-        getErrorMessage(flashError).includes("Timed out waiting for packet");
-      if (!isFinalizeTimeout) {
-        throw flashError;
-      }
-      addProgressLine("Note: stub finalization timed out after write; continuing with hardware reset.");
-      updateModalProgress(s.writingFlash, 100);
+      });
     } finally {
       if (fastBaudForFlash && loader.IS_STUB) {
         try {
@@ -1514,14 +1526,27 @@ function clearConnectError() {
 // ── Download / button helpers ────────────────────────────────────────────────
 
 async function downloadBinary(
-  url: string,
+  asset: FirmwareBinaryAsset,
   onProgress: (received: number, total: number) => void,
 ) {
-  const response = await fetch(url);
+  const source = resolveFirmwareDownloadSource(asset, "flash");
+  const response = await fetch(source.url);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} while downloading firmware`);
   }
 
+  const downloaded = await downloadResponseBuffer(response, onProgress);
+  if (source.compression !== "gzip") {
+    return downloaded;
+  }
+
+  return await gunzipArrayBuffer(downloaded);
+}
+
+async function downloadResponseBuffer(
+  response: Response,
+  onProgress: (received: number, total: number) => void,
+) {
   const total = Number(response.headers.get("content-length") ?? "0");
   if (!response.body) {
     const buffer = await response.arrayBuffer();
@@ -1556,6 +1581,113 @@ async function downloadBinary(
   return merged.buffer;
 }
 
+async function flashBinaryWithConfigPolicy(
+  loader: ESPLoader,
+  firmware: FirmwareRecord,
+  binary: ArrayBuffer,
+  onProgress: (pct: number) => void,
+) {
+  if (!state.preserveConfig) {
+    await flashBinaryChunk(loader, binary, 0x0, onProgress);
+    return;
+  }
+
+  const segments = getFlashSegmentsPreservingNvs(binary, firmware);
+  if (segments.length === 0) {
+    throw new Error("No writable firmware region found outside NVS.");
+  }
+
+  addProgressLine("Keeping existing NVS configuration partition.");
+  const totalBytes = segments.reduce((sum, segment) => sum + segment.size, 0);
+  let writtenBefore = 0;
+
+  for (const segment of segments) {
+    if (segment.offset + segment.size > binary.byteLength) {
+      throw new Error(
+        `Flash segment exceeds binary size: end=${segment.offset + segment.size}, size=${binary.byteLength}.`,
+      );
+    }
+    const segmentData = binary.slice(segment.offset, segment.offset + segment.size);
+    await flashBinaryChunk(loader, segmentData, segment.offset, (segmentPct) => {
+      const writtenNow = Math.round((segment.size * segmentPct) / 100);
+      const totalPct = Math.round(((writtenBefore + writtenNow) / totalBytes) * 100);
+      onProgress(totalPct);
+    });
+    writtenBefore += segment.size;
+    onProgress(Math.round((writtenBefore / totalBytes) * 100));
+  }
+}
+
+async function flashBinaryChunk(
+  loader: ESPLoader,
+  binary: ArrayBuffer,
+  flashOffset: number,
+  onProgress: (pct: number) => void,
+) {
+  let lastWritePct = 0;
+  try {
+    await loader.flashData(
+      binary,
+      (written, total) => {
+        const pct = total > 0 ? Math.round((written / total) * 100) : 0;
+        lastWritePct = pct;
+        onProgress(pct);
+      },
+      flashOffset,
+      true,
+    );
+  } catch (flashError) {
+    // On ESP32-P4 (and some other chips) via UART, the stub does not respond
+    // to the ESP_FLASH_BEGIN(0,0) finalization command after a large compressed
+    // write, causing a "Timed out waiting for packet header" error even though
+    // all data blocks were written successfully.  The post-flash reset is done
+    // via hardware DTR/RTS signals and does not rely on flashDeflFinish, so it
+    // is safe to continue the post-flash flow when this specific condition is met.
+    const isFinalizeTimeout =
+      lastWritePct >= 100 &&
+      getErrorMessage(flashError).includes("Timed out waiting for packet");
+    if (!isFinalizeTimeout) {
+      throw flashError;
+    }
+    addProgressLine("Note: stub finalization timed out after write; continuing with hardware reset.");
+    onProgress(100);
+  }
+}
+
+function getFlashSegmentsPreservingNvs(binary: ArrayBuffer, firmware: FirmwareRecord) {
+  const parsedNvsStart = parseHexAddress(firmware.nvs_info?.start_addr);
+  const parsedNvsSize = parseHexAddress(firmware.nvs_info?.size);
+  const binarySize = binary.byteLength;
+  if (parsedNvsStart === null || parsedNvsSize === null || parsedNvsSize <= 0) {
+    throw new Error(
+      'This firmware does not support configuration retention. Please select "Erase and reset settings" to continue.',
+    );
+  }
+
+  const nvsEnd = parsedNvsStart + parsedNvsSize;
+  if (parsedNvsStart < 0 || parsedNvsStart >= binarySize || nvsEnd > binarySize) {
+    throw new Error("Invalid NVS region in firmware metadata. Disable configuration retention and retry.");
+  }
+
+  const segments: Array<{ offset: number; size: number }> = [];
+  if (parsedNvsStart > 0) {
+    segments.push({ offset: 0, size: parsedNvsStart });
+  }
+  if (nvsEnd < binarySize) {
+    segments.push({ offset: nvsEnd, size: binarySize - nvsEnd });
+  }
+  return segments;
+}
+
+async function gunzipArrayBuffer(buffer: ArrayBuffer) {
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("This browser does not support gzip firmware flashing.");
+  }
+
+  const stream = new Blob([buffer]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return await new Response(stream).arrayBuffer();
+}
+
 function getSelectedFirmware() {
   const boardId = state.selectedBoardId;
   if (!boardId) {
@@ -1571,11 +1703,77 @@ function getSelectedMergedBinary(firmware: FirmwareRecord | null) {
   if (!firmware || !consoleOutput) {
     return null;
   }
-  return firmware.merged_binary[consoleOutput] ?? null;
+  return normalizeFirmwareBinaryAsset(firmware.merged_binary[consoleOutput] ?? null);
 }
 
-function updateDownloadButton(binaryLink: string | null) {
-  if (!binaryLink) {
+function normalizeFirmwareBinaryAsset(asset: FirmwareBinaryAsset | null | undefined) {
+  if (!asset) {
+    return null;
+  }
+  if (typeof asset === "string") {
+    return {
+      bin: asset,
+    };
+  }
+  if (typeof asset !== "object") {
+    return null;
+  }
+
+  const bin = typeof asset.bin === "string" && asset.bin.trim() ? asset.bin : undefined;
+  const gzip = typeof asset.gzip === "string" && asset.gzip.trim() ? asset.gzip : undefined;
+  if (!bin && !gzip) {
+    return null;
+  }
+
+  return { bin, gzip };
+}
+
+function resolveFirmwareDownloadSource(asset: FirmwareBinaryAsset, purpose: "flash"): FirmwareDownloadSource;
+function resolveFirmwareDownloadSource(
+  asset: FirmwareBinaryAsset,
+  purpose: "download",
+): FirmwareDownloadSource | null;
+function resolveFirmwareDownloadSource(
+  asset: FirmwareBinaryAsset,
+  purpose: "download" | "flash",
+): FirmwareDownloadSource | null {
+  const normalized = normalizeFirmwareBinaryAsset(asset);
+  if (!normalized) {
+    if (purpose === "flash") {
+      throw new Error("No firmware binary is available for the selected console output.");
+    }
+    return null;
+  }
+
+  if (purpose === "flash") {
+    if (normalized.gzip && typeof DecompressionStream !== "undefined") {
+      return { url: normalized.gzip, compression: "gzip" };
+    }
+    if (normalized.bin) {
+      return { url: normalized.bin, compression: "none" };
+    }
+    if (normalized.gzip) {
+      throw new Error("This browser does not support gzip firmware flashing.");
+    }
+  }
+
+  if (normalized.gzip) {
+    return { url: normalized.gzip, compression: "gzip" };
+  }
+  if (normalized.bin) {
+    return { url: normalized.bin, compression: "none" };
+  }
+
+  if (purpose === "flash") {
+    throw new Error("No firmware binary is available for the selected console output.");
+  }
+
+  return null;
+}
+
+function updateDownloadButton(asset: FirmwareBinaryAsset | null) {
+  const source = asset ? resolveFirmwareDownloadSource(asset, "download") : null;
+  if (!source) {
     els.downloadBtn.classList.add("disabled");
     els.downloadBtn.setAttribute("aria-disabled", "true");
     els.downloadBtn.href = "#";
@@ -1585,8 +1783,8 @@ function updateDownloadButton(binaryLink: string | null) {
 
   els.downloadBtn.classList.remove("disabled");
   els.downloadBtn.setAttribute("aria-disabled", "false");
-  els.downloadBtn.href = binaryLink;
-  els.downloadBtn.download = binaryLink.split("/").pop() || "firmware.bin";
+  els.downloadBtn.href = source.url;
+  els.downloadBtn.download = source.url.split("/").pop() || "firmware.bin";
 }
 
 function currentSelectionStillVisible() {
@@ -1635,6 +1833,23 @@ function getPortInfo(loader: ESPLoader): SerialPortInfo | null {
 
 function makeBoardId(chipKey: string, brandKey: string, boardKey: string) {
   return `${chipKey}:${brandKey}:${boardKey}`;
+}
+
+function parseHexAddress(value: string | undefined) {
+  if (!value || !value.trim()) {
+    return null;
+  }
+  const trimmed = value.trim();
+  const isHex = /^0x[0-9a-f]+$/i.test(trimmed);
+  const isDecimal = /^[0-9]+$/.test(trimmed);
+  if (!isHex && !isDecimal) {
+    return null;
+  }
+  const parsed = Number.parseInt(trimmed, isHex ? 16 : 10);
+  if (!Number.isFinite(parsed) || !Number.isSafeInteger(parsed) || parsed < 0) {
+    return null;
+  }
+  return parsed;
 }
 
 function chipLabel(chipKey: string) {

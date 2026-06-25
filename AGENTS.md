@@ -18,7 +18,7 @@ Generate board manager files and build from the app directory:
 
 ```bash
 cd application/edge_agent
-idf.py gen-bmgr-config -c ./boards -b esp32_S3_DevKitC_1
+idf.py bmgr -c ./boards -b esp32_S3_DevKitC_1
 idf.py build
 idf.py flash monitor
 ```
@@ -49,7 +49,7 @@ The main entry point is `application/edge_agent/main/main.c`.
 ### Core Data Flow
 
 1. IM channels, scheduler jobs, Lua scripts, startup hooks, or CLI commands publish events or submit requests.
-2. `claw_event_router` matches events against `/fatfs/router_rules/router_rules.json` and can call capabilities, run scripts, run the agent, send messages, emit events, or drop events.
+2. `claw_event_router` matches events against the DATA root's `router_rules/router_rules.json` and can call capabilities, run scripts, run the agent, send messages, emit events, or drop events.
 3. `claw_core` builds context from memory, session history, skills, and other providers; calls the configured LLM backend; executes capability tool calls; persists context; and returns responses.
 4. Outbound messages are routed back through registered IM bindings or local/web channels.
 
@@ -64,8 +64,21 @@ The main entry point is `application/edge_agent/main/main.c`.
 - **Skills** (`components/claw_modules/claw_skill/`, component `skills/` directories): user-facing skill documents and activation state.
 - **Lua modules** (`components/lua_modules/`): Lua drivers and higher-level modules for hardware, media, HTTP server, storage, threading, JSON, board manager, and capability calls.
 - **Board manager** (`application/edge_agent/boards/`): board metadata, peripheral YAML, board setup code, board defaults, optional local components, and optional board FATFS overlays.
-- **FATFS image** (`application/edge_agent/fatfs_image/`): base runtime files for memory, skills, scripts, router rules, scheduler rules, inbox, and static assets.
+- **FATFS images** (`application/edge_agent/fatfs_image/`): build-time source trees for the read-only SYSTEM image and writable DATA seed image.
 - **HTTP config service** (`application/edge_agent/components/http_server/`): local device configuration server and embedded frontend.
+
+### Runtime Path Rules
+
+The firmware uses two logical filesystem roots, configured at boot through `claw_paths`:
+
+- `CLAW_PATH_SYSTEM` is mounted at `/system`. It is read-only and contains firmware-baked skills, skill assets, built-in Lua modules, Lua docs/tests, board image overlays, and `.recovery` seed files.
+- `CLAW_PATH_DATA` is the writable storage root. It is `/fatfs` when flash storage is used, or the board-manager SD card mount point when an SD card is available.
+- Never hard-code `/fatfs` for writable paths in reusable code or docs. Use `claw_paths_join(CLAW_PATH_DATA, ...)` in C and `storage.get_root_dir()` plus `storage.join_path(...)` in Lua.
+- Firmware-baked skill scripts must be referenced with `{CUR_SKILL_DIR}/scripts/...` inside `SKILL.md`; do not write fixed `/fatfs/skills/...` paths.
+- Runtime-installed/user skills live under the DATA root's `skills/`. Firmware-baked skills live under `/system/skills/`; the skill registry scans both, with DATA skills taking priority when ids conflict.
+- Router rules, scheduler rules, memory, sessions, inbox, and user-generated files live under DATA. Recovery defaults are stored under `/system/.recovery` and copied into DATA only when missing.
+- Built-in Lua libraries are staged under `/system/scripts/builtin/lib`; generated Lua module docs/tests are bundled into the `builtin_lua_modules` skill and should be accessed via that skill's `{CUR_SKILL_DIR}` paths.
+- Board-specific `boards/<vendor>/<board>/fatfs_image/` content overlays the SYSTEM image at build time. Board image content does not target DATA and hidden board folders are not considered.
 
 ## Project-Specific Notes
 
@@ -75,6 +88,18 @@ The main entry point is `application/edge_agent/main/main.c`.
 - Specs (`.agents/spec/`):
   - lua module spec: [lua-module-spec.md](.agents/spec/lua-module-spec.md)
   - claw skill spec: [claw-skill-spec.md](.agents/spec/claw-skill-spec.md)
+
+## General Engineering Rules
+
+- Use modular design. Each module should have clear responsibilities, ownership, and boundaries.
+- Keep source files under 1500 lines where practical; split files by responsibility when they grow beyond that.
+- Keep functions focused and reviewable; split large functions instead of adding deeply nested branches.
+- Avoid magic numbers and magic strings. Use named constants, enums, macros, Kconfig options, or shared config keys.
+- Prefer explicit ownership and explicit data flow over hidden global state.
+- Keep public headers small and avoid exposing private implementation details.
+- Avoid circular dependencies between components and modules.
+- Check return values, handle allocation failures, and clean up partially initialized resources.
+- Protect shared mutable state with documented ownership or synchronization.
 
 ## Code Style
 

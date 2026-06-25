@@ -12,7 +12,7 @@ If a behavior can live in a capability group, Lua module, skill, router rule, bo
 
 Capabilities live under `components/claw_capabilities/` and are registered through `components/common/app_claw/app_capabilities.c`. Each capability group should keep its setup, credentials, storage paths, and registration local to that group.
 
-Skills are user-facing instructions and assets. Built-in skill sources live under component `skills/` directories and are synced into the FATFS image at build time. Prefer skills for model know-how and workflows; prefer capabilities for callable firmware functions.
+Skills are user-facing instructions and assets. Built-in skill sources live under component `skills/` directories and are synced into the read-only SYSTEM image at build time. Prefer skills for model know-how and workflows; prefer capabilities for callable firmware functions.
 
 ## Keep Lua modules modular
 
@@ -20,8 +20,10 @@ Lua drivers and modules live under `components/lua_modules/` and are registered 
 
 Do not add board-specific assumptions to generic Lua modules. Put board-specific setup in the board directory or in the board manager data.
 
-## Respect FATFS layering
+## Respect filesystem layering
 
-Shared build-time FATFS defaults live in `application/edge_agent/fatfs_image/`. During build, CMake stages that directory into `build/fatfs_image/`, then overlays the selected board's `fatfs_image/` if present. Skills and built-in Lua scripts/docs are then synced into the staged image.
+Shared build-time FATFS defaults live in `application/edge_agent/fatfs_image/` with one subdirectory per partition. The SYSTEM source tree (`fatfs_image/system/`) is staged into `build/system_fs_image/`, then the selected board's `fatfs_image/` overlay is copied into that SYSTEM staging directory if present. Component skills and built-in Lua scripts/docs are then synced into the SYSTEM staging directory. Board overlay content does not target writable DATA storage, and hidden board folders are not considered.
+
+The writable DATA root is selected at boot: `/fatfs` for flash storage, or the board-manager SD card mount point when an SD card is available. Runtime code must resolve writable paths through `claw_paths` in C or the Lua `storage` module instead of hard-coding `/fatfs`.
 
 Edit source FATFS content or board overlays, not generated staged output.

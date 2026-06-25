@@ -5,6 +5,7 @@
  */
 #include "cap_im_tg.h"
 #include "cap_im_attachment.h"
+#include "claw_utils_string.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -208,9 +209,12 @@ static esp_err_t cap_im_tg_api_call(const char *method,
     config.event_handler = cap_im_tg_http_event_handler;
     config.user_data = &resp;
     config.timeout_ms = (CAP_IM_TG_POLL_TIMEOUT_S + 5) * 1000;
-    config.buffer_size = 1024;
+    config.buffer_size = 2048;
     config.buffer_size_tx = 2048;
     config.crt_bundle_attach = esp_crt_bundle_attach;
+#ifdef CONFIG_HTTP_REUSE_ENABLE
+    config.keep_alive_enable = true;
+#endif
 
     client = esp_http_client_init(&config);
     if (!client) {
@@ -284,7 +288,7 @@ static esp_err_t cap_im_tg_publish_attachment_event(const char *chat_id,
     strlcpy(event.message_id, message_id, sizeof(event.message_id));
     strlcpy(event.content_type, content_type, sizeof(event.content_type));
     event.timestamp_ms = cap_im_tg_now_ms();
-    event.session_policy = CLAW_EVENT_SESSION_POLICY_CHAT;
+    event.session_policy = CLAW_SESSION_POLICY_CHAT;
     snprintf(event.event_id, sizeof(event.event_id), "tg-attach-%" PRId64, event.timestamp_ms);
     event.text = "";
     event.payload_json = (char *)payload_json;
@@ -1018,6 +1022,9 @@ static esp_err_t cap_im_tg_send_multipart_file(const char *method,
     config.buffer_size = 2048;
     config.buffer_size_tx = 2048;
     config.crt_bundle_attach = esp_crt_bundle_attach;
+#ifdef CONFIG_HTTP_REUSE_ENABLE
+    config.keep_alive_enable = true;
+#endif
 
     client = esp_http_client_init(&config);
     if (!client) {
@@ -1499,7 +1506,10 @@ esp_err_t cap_im_tg_send_text(const char *chat_id, const char *text)
         esp_err_t err;
 
         if (chunk_len > CAP_IM_TG_MAX_MSG_LEN) {
-            chunk_len = CAP_IM_TG_MAX_MSG_LEN;
+            chunk_len = claw_utils_utf8_prefix_len(text + offset, CAP_IM_TG_MAX_MSG_LEN);
+            if (chunk_len == 0) {
+                return ESP_ERR_INVALID_ARG;
+            }
         }
 
         chunk = calloc(1, chunk_len + 1);
