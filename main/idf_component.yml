@@ -54,3 +54,9 @@ dependencies:
 
   cmd_wifi:
     path: ../components/cmd_wifi
+
+  # ---- The quadruped ----------------------------------------------------
+  mpx_robot:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_robot

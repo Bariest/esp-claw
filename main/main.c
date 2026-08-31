@@ -29,6 +29,9 @@
 #include "cap_im_wechat.h"
 #endif
 #include "app_config.h"
+#if CONFIG_MP4_ROBOT_ENABLE
+#include "mpx_robot.h"
+#endif
 
 #define APP_ENABLE_MEM_LOG        (0)
 
@@ -335,6 +338,26 @@ void app_main(void)
      * without knowing whether data lives on flash or an SD card. */
     ESP_ERROR_CHECK(claw_paths_set(CLAW_PATH_DATA, app_fs_storage_base_path()));
     ESP_ERROR_CHECK(claw_paths_set(CLAW_PATH_SYSTEM, app_fs_system_base_path()));
+
+#if CONFIG_MP4_ROBOT_ENABLE
+    /* Robot HAL: SPI3, the four AT32F413 driver boards, the BMI270, the
+     * persisted servo offsets, and the gait task on core 1.
+     *
+     * Here rather than later because it needs NVS and the board manager and
+     * nothing else, and because a robot that cannot stand is worth knowing
+     * about before we spend thirty seconds waiting for Wi-Fi. Deliberately
+     * NOT fatal: a board with no servo harness attached should still boot
+     * into the agent and the web UI so it can be diagnosed.
+     *
+     * The WASM skill runtime attaches to this later, after app_claw_start(),
+     * so that a misbehaving autorun skill cannot keep the web UI from
+     * coming up. That ordering is the difference between a bad skill and a
+     * brick, and it is why the two are not initialised together. */
+    if (!mpx_robot_init()) {
+        ESP_LOGW(TAG, "Robot init failed - continuing without servos");
+    }
+#endif
+
 
     ESP_ERROR_CHECK(wifi_manager_init());
 
