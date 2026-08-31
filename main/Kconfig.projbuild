@@ -103,6 +103,22 @@ menu "MP4 Robot"
             the AAD for the MPXE encrypted-skill key unwrap. Changing it
             makes every already-purchased skill fail to decrypt.
 
+    config MP4_VOICE_ENABLE
+        bool "Offline voice: wake word and command recognition"
+        depends on MP4_ROBOT_ENABLE
+        default y
+        help
+            Pull in esp-sr and run its acoustic front end, WakeNet and
+            MultiNet on the ES7210 microphones.
+
+            This is command recognition, not dictation: MultiNet matches a
+            fixed list of phrases compiled into the firmware. Free-form
+            speech needs a cloud transcription service, which this does not
+            include.
+
+            The models live in the "model" partition, which exists only in
+            partitions_16MB.csv. A board with less flash cannot hold them.
+
     config MP4_GATEWAY_HOST
         string "Skill marketplace gateway host"
         depends on MP4_ROBOT_ENABLE

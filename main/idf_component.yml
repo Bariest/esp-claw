@@ -90,3 +90,10 @@ dependencies:
     - if: $CONFIG{MP4_ROBOT_ENABLE} == True
     - if: $CONFIG{ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT} == True
     path: ../components/cap_display
+
+  # Acoustic front end, WakeNet and MultiNet. Large: it brings esp-dl and
+  # esp-dsp with it, and the first build downloads several hundred MB.
+  espressif/esp-sr:
+    version: "^2.5.2"
+    rules:
+      - if: $CONFIG{MP4_VOICE_ENABLE} == True

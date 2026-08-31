@@ -68,3 +68,25 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 # socket pool would survive a reconnect storm.
 CONFIG_LWIP_TCP_MSL=5000
 CONFIG_LWIP_SO_LINGER=y
+
+# -- Offline voice models ----------------------------------------------
+#
+# These pack into the 2904K "model" partition. The sizes, measured from
+# the esp-sr tree, are the reason for each choice:
+#
+#   wn9_hiesp                 296K   wake word, "Hi ESP"
+#   vadnet1_medium            292K   the AFE pipeline VAD stage
+#   mn5q8_en                 2140K   English commands, 8-bit quantised
+#                            -----
+#                            2728K   of 2904K, leaving 176K
+#
+# mn7_en recognises better but is 2700K on its own, which does not fit
+# beside a wake word and a VAD. Noise suppression is the non-neural WebRTC
+# one because nsnet2 is a further 1.2M and the speech-recognition pipeline
+# is AEC -> VAD -> WakeNet, with no NS stage in it at all.
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_WN_WN9_HIESP=y
+CONFIG_SR_VADN_VADNET1_MEDIUM=y
+CONFIG_SR_NSN_WEBRTC=y
+CONFIG_SR_MN_EN_MULTINET5_SINGLE_RECOGNITION_QUANT8=y
+CONFIG_SR_MN_CN_NONE=y
