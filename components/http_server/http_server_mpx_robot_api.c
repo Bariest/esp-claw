@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2026 MangDang
  * SPDX-License-Identifier: Apache-2.0
  *
- * /v1/robot/* -- the movement and calibration half of the API the MPX-Dog PWA
+ * The /v1/robot routes -- the movement and calibration half of the API the MPX-Dog PWA
  * speaks. Ported from main/network/http_server.cc.
  *
  * The response shapes are a contract, not a preference: pwa-redesign reads

@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2026 MangDang
  * SPDX-License-Identifier: Apache-2.0
  *
- * /v1/fs/* -- the file browser the PWA's FileViewer and AddActionView use.
+ * The /v1/fs routes -- the file browser the PWA's FileViewer and AddActionView use.
  *
  * These are a thin re-spelling of ESP-Claw's own /api/files endpoints: same
  * DATA root, same path-safety rule, different JSON field names because the
@@ -18,10 +18,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include "esp_log.h"
+#include "esp_vfs_fat.h"
 
 #include "http_server_priv.h"
 
@@ -100,21 +100,24 @@ static esp_err_t fs_info_handler(httpd_req_t *req)
 {
     cJSON *resp = cJSON_CreateObject();
     const http_server_ctx_t *ctx = http_server_ctx();
-    struct statvfs vfs;
+    uint64_t total = 0;
+    uint64_t free_bytes = 0;
 
     if (!resp) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
     }
 
-    /* statvfs on FATFS is cheap -- it reads the FAT header, not every block.
-     * The MPX-Dog firmware had to cache this because LittleFS's equivalent
-     * walked a 13 MB partition on the HTTP request path and stalled whatever
-     * request was queued behind it. That hazard does not exist here. */
-    if (ctx && statvfs(ctx->storage_base_path, &vfs) == 0) {
-        const double total = (double)vfs.f_blocks * (double)vfs.f_frsize;
-        const double avail = (double)vfs.f_bavail * (double)vfs.f_frsize;
-        cJSON_AddNumberToObject(resp, "total", total);
-        cJSON_AddNumberToObject(resp, "used", total - avail);
+    /* esp_vfs_fat_info(), not statvfs() -- ESP-IDF's newlib has no
+     * <sys/statvfs.h>, and this is what the rest of the firmware uses
+     * (app_fs.c and lua_module_storage both call it).
+     *
+     * It reads the FAT allocation table rather than walking every block, so it
+     * is safe on the HTTP request path. The MPX-Dog firmware had to cache the
+     * equivalent because LittleFS's version traversed a 13 MB partition and
+     * stalled whatever request was queued behind it; that hazard is gone. */
+    if (ctx && esp_vfs_fat_info(ctx->storage_base_path, &total, &free_bytes) == ESP_OK) {
+        cJSON_AddNumberToObject(resp, "total", (double)total);
+        cJSON_AddNumberToObject(resp, "used", (double)(total - free_bytes));
     } else {
         cJSON_AddNumberToObject(resp, "total", 0);
         cJSON_AddNumberToObject(resp, "used", 0);
@@ -147,7 +150,7 @@ static esp_err_t fs_read_handler(httpd_req_t *req)
     }
     if (st.st_size > MPX_FS_READ_MAX) {
         /* This endpoint exists to look at scripts and manifests. Anything
-         * larger is a download, and /files/* already streams those. */
+         * larger is a download, and /files/[*] already streams those. */
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                    "file too large to view; download it instead");
     }

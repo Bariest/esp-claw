@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2026 MangDang
  * SPDX-License-Identifier: Apache-2.0
  *
- * /v1/skills/*, /v1/logs and /v1/trace.
+ * The /v1/skills routes, plus /v1/logs and /v1/trace.
  */
 
 #include <stdio.h>
