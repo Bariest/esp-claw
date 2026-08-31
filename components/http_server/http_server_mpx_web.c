@@ -391,7 +391,7 @@ static void web_socket_reaper_task(void *arg)
 /* ── Registration ──────────────────────────────────────────────────────────
  *
  * Registered LAST, after every /v1 route: esp_http_server hands a request to
- * the first entry that matches, and "/*" matches everything. */
+ * the first entry that matches, and the catch-all matches every GET. */
 
 esp_err_t http_server_register_mpx_web_routes(httpd_handle_t server)
 {
