@@ -12,6 +12,7 @@ idf_component_register(
     SRCS
         "src/log_ring.cc"
         "src/trace_ring.cc"
+        "src/mpx_rings.cc"
     INCLUDE_DIRS
         "include"
     PRIV_REQUIRES

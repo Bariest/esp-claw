@@ -17,6 +17,7 @@
 #include "events.h"
 #include "movement.h"
 #include "mpx_robot.h"
+#include "mpx_skill_fs.h"
 #include "registry.h"
 #include "runner.h"
 #include "wasm_host_functions.h"
@@ -176,6 +177,37 @@ const char *mpx_wasm_movement_result_text(mpx_movement_result_t r)
         case MPX_MOVEMENT_UNKNOWN:
         default:                         return "no such movement";
     }
+}
+
+/* ── The skills directory ──────────────────────────────────────────────── */
+
+bool mpx_wasm_skill_file_write(const char *name, const void *data, size_t len)
+{
+    return name != nullptr && data != nullptr &&
+           fs::write_file(name, (const std::uint8_t *)data, len);
+}
+
+size_t mpx_wasm_skill_file_read(const char *name, void *buf, size_t buf_size)
+{
+    if (name == nullptr || buf == nullptr) {
+        return 0;
+    }
+    const std::vector<std::uint8_t> bytes = fs::read_file(name);
+    if (bytes.empty() || bytes.size() > buf_size) {
+        return 0;
+    }
+    memcpy(buf, bytes.data(), bytes.size());
+    return bytes.size();
+}
+
+bool mpx_wasm_skill_file_delete(const char *name)
+{
+    return name != nullptr && fs::delete_file(name);
+}
+
+bool mpx_wasm_skill_file_exists(const char *name)
+{
+    return name != nullptr && fs::exists(name);
 }
 
 /* ── Events and safe mode ──────────────────────────────────────────────── */

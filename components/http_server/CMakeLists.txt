@@ -35,6 +35,15 @@ set(http_server_requires
     heap
 )
 
+if(CONFIG_MP4_ROBOT_ENABLE)
+    # The /v1 API the MPX-Dog PWA speaks.
+    list(APPEND http_server_srcs
+        "http_server_mpx_robot_api.c"
+        "http_server_mpx_skills_api.c"
+        "http_server_mpx_fs_api.c")
+    list(APPEND http_server_requires mpx_robot mpx_wasm mpx_util)
+endif()
+
 if(CONFIG_APP_CLAW_LUA_MODULE_HTTP_SERVER)
     list(APPEND http_server_srcs "http_server_lua_app_api.c")
     list(APPEND http_server_requires lua_module_http_server)

@@ -57,3 +57,24 @@ esp_err_t http_server_register_wechat_routes(httpd_handle_t server);
 esp_err_t http_server_register_webim_routes(httpd_handle_t server);
 void http_server_webim_ws_fd_remove(int fd);
 esp_err_t http_server_captive_404_handler(httpd_req_t *req, httpd_err_code_t error);
+
+/* ── Shared registration helper ───────────────────────────────────────────
+ *
+ * Registers a table of handlers and LOGS the URI of anything that fails.
+ *
+ * That logging is the whole point. httpd silently refuses registrations once
+ * max_uri_handlers is full, and the MPX-Dog firmware lost a day to exactly
+ * that: the marketplace POST/PATCH/DELETE routes stopped registering when the
+ * table filled at 64 entries, and the only symptom was 404s from endpoints
+ * whose code was plainly right there. A failed registration must say so. */
+esp_err_t http_server_register_uri_table(httpd_handle_t server,
+                                         const httpd_uri_t *handlers,
+                                         size_t count,
+                                         const char *group_name);
+
+#if CONFIG_MP4_ROBOT_ENABLE
+/* The /v1 API the MPX-Dog PWA speaks. */
+esp_err_t http_server_register_mpx_robot_routes(httpd_handle_t server);
+esp_err_t http_server_register_mpx_skills_routes(httpd_handle_t server);
+esp_err_t http_server_register_mpx_fs_routes(httpd_handle_t server);
+#endif

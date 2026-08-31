@@ -32,6 +32,7 @@
 #if CONFIG_MP4_ROBOT_ENABLE
 #include "mpx_robot.h"
 #include "mpx_wasm.h"
+#include "mpx_rings.h"
 #include "app_capabilities.h"
 #include "cap_robot.h"
 #include "cap_mpx_skill.h"
@@ -401,6 +402,14 @@ static void app_register_robot_capabilities(void)
 
 void app_main(void)
 {
+#if CONFIG_MP4_ROBOT_ENABLE
+    /* First, before anything logs. The ring installs a vprintf hook that
+     * chains to the existing sink, so serial output is unchanged -- but
+     * anything logged before this point is not in it, and the boot sequence
+     * is exactly the part you want when a device will not come up. */
+    mpx_log_ring_init();
+#endif
+
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
     esp_log_level_set("http_reuse", ESP_LOG_WARN);
 

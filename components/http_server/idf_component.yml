@@ -9,3 +9,20 @@ dependencies:
       - if: $CONFIG{APP_CLAW_CAP_LUA} == True
       - if: $CONFIG{APP_CLAW_LUA_MODULE_HTTP_SERVER} == True
     path: ../../third-party/esp-claw/components/lua_modules/lua_module_http_server
+
+  # The /v1 robot API lives in this component; declare what it needs rather
+  # than relying on main pulling the same things in.
+  mpx_robot:
+    rules:
+      - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../mpx_robot
+
+  mpx_wasm:
+    rules:
+      - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../mpx_wasm
+
+  mpx_util:
+    rules:
+      - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../mpx_util

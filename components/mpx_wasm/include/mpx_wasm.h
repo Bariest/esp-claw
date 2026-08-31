@@ -122,6 +122,29 @@ mpx_movement_result_t mpx_wasm_movement_run(const char *name, bool from_skill);
 /** @brief Human-readable text for a movement result. Never NULL. */
 const char *mpx_wasm_movement_result_text(mpx_movement_result_t r);
 
+/* ── The skills directory ──────────────────────────────────────────────── */
+/*
+ * Every name here is relative to <DATA>/mpx_skills and cannot escape it: the
+ * implementation refuses anything containing "..". The HTTP upload handler
+ * additionally applies the stricter filename rule the marketplace flow relies
+ * on (see skill_filename_ok in the /v1/skills handlers) before it gets here.
+ */
+
+/** @brief Write a whole file. A partial write is removed rather than left. */
+bool mpx_wasm_skill_file_write(const char *name, const void *data, size_t len);
+
+/**
+ * @brief Read a whole file into `buf`.
+ * @return bytes read, or 0 if missing, unreadable, or larger than `buf_size`.
+ */
+size_t mpx_wasm_skill_file_read(const char *name, void *buf, size_t buf_size);
+
+/** @brief Delete a file. False if it was not there. */
+bool mpx_wasm_skill_file_delete(const char *name);
+
+/** @brief Whether a file exists. */
+bool mpx_wasm_skill_file_exists(const char *name);
+
 /* ── Events and safe mode ──────────────────────────────────────────────── */
 
 /**

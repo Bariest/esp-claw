@@ -55,6 +55,28 @@ esp_err_t http_server_init(const http_server_config_t *config)
     return ESP_OK;
 }
 
+esp_err_t http_server_register_uri_table(httpd_handle_t server,
+                                         const httpd_uri_t *handlers,
+                                         size_t count,
+                                         const char *group_name)
+{
+    esp_err_t first_error = ESP_OK;
+
+    for (size_t i = 0; i < count; ++i) {
+        const esp_err_t err = httpd_register_uri_handler(server, &handlers[i]);
+        if (err != ESP_OK) {
+            /* Keep going rather than bailing: one full table should not hide
+             * how many other routes are also missing. */
+            ESP_LOGE(TAG, "UNREGISTERED: %s (%s) - this endpoint will 404",
+                     handlers[i].uri, group_name ? group_name : "?");
+            if (first_error == ESP_OK) {
+                first_error = err;
+            }
+        }
+    }
+    return first_error;
+}
+
 static void http_server_close_fn(httpd_handle_t hd, int sockfd)
 {
     (void)hd;
@@ -71,7 +93,11 @@ esp_err_t http_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.ctrl_port = HTTP_SERVER_CTRL_PORT;
-    config.max_uri_handlers = 32;
+    /* ESP-Claw registers 21; the MPX-Dog /v1 API adds roughly 30 more.
+     * httpd refuses registrations past this limit *silently*, so the
+     * headroom is deliberate and http_server_register_uri_table() shouts if
+     * one is ever refused anyway. */
+    config.max_uri_handlers = 88;
     config.stack_size = 8192;
     config.max_open_sockets = 12;
     config.lru_purge_enable = true;
@@ -99,6 +125,13 @@ esp_err_t http_server_start(void)
 #endif
     ESP_RETURN_ON_ERROR(http_server_register_wechat_routes(s_ctx.server), TAG, "Failed to register WeChat routes");
     ESP_RETURN_ON_ERROR(http_server_register_webim_routes(s_ctx.server), TAG, "Failed to register Web IM routes");
+#if CONFIG_MP4_ROBOT_ENABLE
+    /* Registered after ESP-Claw's own routes so that if a path ever collides,
+     * the framework keeps it and the robot API is the one that complains. */
+    ESP_RETURN_ON_ERROR(http_server_register_mpx_robot_routes(s_ctx.server), TAG, "Failed to register robot routes");
+    ESP_RETURN_ON_ERROR(http_server_register_mpx_skills_routes(s_ctx.server), TAG, "Failed to register robot skill routes");
+    ESP_RETURN_ON_ERROR(http_server_register_mpx_fs_routes(s_ctx.server), TAG, "Failed to register robot fs routes");
+#endif
     ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),
                         TAG, "Failed to register captive 404 handler");
 
