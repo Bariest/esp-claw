@@ -69,7 +69,8 @@ The console is the CH340K on UART0, not USB-Serial-JTAG.
 ### On Windows, set PYTHONIOENCODING first
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"    # or set it permanently for your user
+chcp 65001                          # console codepage to UTF-8
+$env:PYTHONIOENCODING = "utf-8"     # or set it permanently for your user
 ```
 
 esp-sr's `model/movemodel.py` prints a box-drawing character in its model
@@ -78,6 +79,11 @@ report. With the default cp1252 console codec that raises
 it reaches any of our code, and with an error that looks nothing like the
 cause. It is a bug in esp-sr, still present on their master, so bumping the
 version does not help.
+
+Set the codepage as well, not just the variable. `PYTHONIOENCODING` alone
+makes Python emit UTF-8 into a cp437 console, so `idf.py size` draws its
+table as `ΓöîΓöÇΓöÇ...`. The numbers are still right; only the box-drawing
+characters are mangled.
 
 ## How ESP-Claw components enter the build
 
