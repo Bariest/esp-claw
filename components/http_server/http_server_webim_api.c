@@ -263,6 +263,14 @@ static esp_err_t webim_outbound_cb(const cap_im_local_message_t *message, void *
                  message->channel, WEB_IM_CHANNEL);
         return ESP_OK;
     }
+#if CONFIG_MP4_ROBOT_ENABLE
+    /* cap_im_local has one outbound callback slot and this file holds it, so
+     * the PWA's chat socket is fed from here rather than by taking the slot
+     * away. Both views are on the "web" channel and each delivers only to the
+     * chat_id it is watching, so ESP-Claw's own UI and the PWA show the same
+     * conversation without seeing each other's. */
+    http_server_mpx_chat_on_outbound(message);
+#endif
     return webim_emit_outbound_json(message);
 }
 

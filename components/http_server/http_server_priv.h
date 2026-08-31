@@ -73,6 +73,8 @@ esp_err_t http_server_register_uri_table(httpd_handle_t server,
                                          const char *group_name);
 
 #if CONFIG_MP4_ROBOT_ENABLE
+#include "cap_im_local.h"
+
 /* The /v1 API the MPX-Dog PWA speaks. */
 esp_err_t http_server_register_mpx_robot_routes(httpd_handle_t server);
 esp_err_t http_server_register_mpx_skills_routes(httpd_handle_t server);
@@ -80,6 +82,12 @@ esp_err_t http_server_register_mpx_fs_routes(httpd_handle_t server);
 esp_err_t http_server_register_mpx_studio_routes(httpd_handle_t server);
 esp_err_t http_server_register_mpx_wifi_routes(httpd_handle_t server);
 esp_err_t http_server_register_mpx_market_routes(httpd_handle_t server);
+esp_err_t http_server_register_mpx_chat_routes(httpd_handle_t server);
+void http_server_mpx_chat_ws_fd_remove(int fd);
+/* Mirror of every outbound "web" message into the PWA chat socket.
+ * cap_im_local has one outbound callback slot and webim owns it, so the
+ * fan-out happens there rather than by fighting over the slot. */
+void http_server_mpx_chat_on_outbound(const cap_im_local_message_t *message);
 #if CONFIG_APP_CLAW_CAP_LUA
 esp_err_t http_server_register_mpx_lua_routes(httpd_handle_t server);
 #endif

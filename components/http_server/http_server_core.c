@@ -81,6 +81,9 @@ static void http_server_close_fn(httpd_handle_t hd, int sockfd)
 {
     (void)hd;
     http_server_webim_ws_fd_remove(sockfd);
+#if CONFIG_MP4_ROBOT_ENABLE
+    http_server_mpx_chat_ws_fd_remove(sockfd);
+#endif
     close(sockfd);
 }
 
@@ -134,6 +137,7 @@ esp_err_t http_server_start(void)
     ESP_RETURN_ON_ERROR(http_server_register_mpx_studio_routes(s_ctx.server), TAG, "Failed to register servo studio routes");
     ESP_RETURN_ON_ERROR(http_server_register_mpx_wifi_routes(s_ctx.server), TAG, "Failed to register wifi routes");
     ESP_RETURN_ON_ERROR(http_server_register_mpx_market_routes(s_ctx.server), TAG, "Failed to register marketplace routes");
+    ESP_RETURN_ON_ERROR(http_server_register_mpx_chat_routes(s_ctx.server), TAG, "Failed to register chat routes");
 #if CONFIG_APP_CLAW_CAP_LUA
     ESP_RETURN_ON_ERROR(http_server_register_mpx_lua_routes(s_ctx.server), TAG, "Failed to register lua routes");
 #endif
