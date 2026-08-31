@@ -77,4 +77,5 @@ esp_err_t http_server_register_uri_table(httpd_handle_t server,
 esp_err_t http_server_register_mpx_robot_routes(httpd_handle_t server);
 esp_err_t http_server_register_mpx_skills_routes(httpd_handle_t server);
 esp_err_t http_server_register_mpx_fs_routes(httpd_handle_t server);
+esp_err_t http_server_register_mpx_studio_routes(httpd_handle_t server);
 #endif

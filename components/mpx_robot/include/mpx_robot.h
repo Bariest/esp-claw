@@ -169,6 +169,24 @@ float mpx_robot_read_temperature_c(int servo_id);
 /** @brief Probe a channel. >0 if the driver board answered. */
 int mpx_robot_ping_servo(int servo_id);
 
+/* ── Servo Studio ──────────────────────────────────────────────────────────
+ *
+ * Studio mode parks the gait task so something else can own the servo bus.
+ * It matters because a parameter exchange with an AT32 board is a REQUEST
+ * FOLLOWED BY A REPLY, and the two must not be separated -- split them and the
+ * reply is left pending in the board's tx buffer, where the next decode reads
+ * it as garbage. A 31 degree reading comes back as 1540.
+ *
+ * While studio mode is on the servos simply hold their last commanded pose.
+ * Read-only telemetry does NOT require it; only parameter access does.
+ */
+
+/** @brief Park or resume the gait task. */
+void mpx_robot_set_studio_mode(bool on);
+
+/** @brief Whether Servo Studio currently holds the bus. */
+bool mpx_robot_studio_mode(void);
+
 /* ── Low-level joint control ───────────────────────────────────────────── */
 
 /** @brief Buffer one joint angle, in degrees from centre. */

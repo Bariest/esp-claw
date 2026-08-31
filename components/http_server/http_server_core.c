@@ -131,6 +131,7 @@ esp_err_t http_server_start(void)
     ESP_RETURN_ON_ERROR(http_server_register_mpx_robot_routes(s_ctx.server), TAG, "Failed to register robot routes");
     ESP_RETURN_ON_ERROR(http_server_register_mpx_skills_routes(s_ctx.server), TAG, "Failed to register robot skill routes");
     ESP_RETURN_ON_ERROR(http_server_register_mpx_fs_routes(s_ctx.server), TAG, "Failed to register robot fs routes");
+    ESP_RETURN_ON_ERROR(http_server_register_mpx_studio_routes(s_ctx.server), TAG, "Failed to register servo studio routes");
 #endif
     ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),
                         TAG, "Failed to register captive 404 handler");

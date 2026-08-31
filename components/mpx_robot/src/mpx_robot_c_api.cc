@@ -146,6 +146,11 @@ int   mpx_robot_read_current(int s)      { return robot::read_current(s); }
 float mpx_robot_read_temperature_c(int s){ return robot::read_temperature_c(s); }
 int   mpx_robot_ping_servo(int s)        { return robot::ping_servo(s); }
 
+/* ── Servo Studio ──────────────────────────────────────────────────────── */
+
+void mpx_robot_set_studio_mode(bool on) { robot::set_studio_mode(on); }
+bool mpx_robot_studio_mode(void)        { return robot::studio_mode(); }
+
 /* ── Low-level joint control ───────────────────────────────────────────── */
 
 void  mpx_robot_set_servo_angle(int s, float deg) { robot::set_servo_angle(s, deg); }

@@ -40,7 +40,8 @@ if(CONFIG_MP4_ROBOT_ENABLE)
     list(APPEND http_server_srcs
         "http_server_mpx_robot_api.c"
         "http_server_mpx_skills_api.c"
-        "http_server_mpx_fs_api.c")
+        "http_server_mpx_fs_api.c"
+        "http_server_mpx_studio_api.c")
     list(APPEND http_server_requires mpx_robot mpx_wasm mpx_util fatfs)
 endif()
 
