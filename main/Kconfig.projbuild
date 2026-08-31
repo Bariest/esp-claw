@@ -103,6 +103,22 @@ menu "MP4 Robot"
             the AAD for the MPXE encrypted-skill key unwrap. Changing it
             makes every already-purchased skill fail to decrypt.
 
+    config MP4_GATEWAY_HOST
+        string "Skill marketplace gateway host"
+        depends on MP4_ROBOT_ENABLE
+        default ""
+        help
+            Host or IP of the skill marketplace gateway that /v1/marketplace/*
+            is proxied to. Leave empty (or set to "echo") to build a robot with
+            no marketplace: those routes then answer 503 and the PWA's Store
+            screen stays empty instead of hanging on a host that is not there.
+
+    config MP4_GATEWAY_PORT
+        int "Skill marketplace gateway port"
+        depends on MP4_ROBOT_ENABLE
+        range 1 65535
+        default 8080
+
     config MP4_SKILL_AES_KEY_HEX
         string "MPXE skill decryption key (64 hex chars)"
         depends on MP4_ROBOT_ENABLE

@@ -132,6 +132,11 @@ esp_err_t http_server_start(void)
     ESP_RETURN_ON_ERROR(http_server_register_mpx_skills_routes(s_ctx.server), TAG, "Failed to register robot skill routes");
     ESP_RETURN_ON_ERROR(http_server_register_mpx_fs_routes(s_ctx.server), TAG, "Failed to register robot fs routes");
     ESP_RETURN_ON_ERROR(http_server_register_mpx_studio_routes(s_ctx.server), TAG, "Failed to register servo studio routes");
+    ESP_RETURN_ON_ERROR(http_server_register_mpx_wifi_routes(s_ctx.server), TAG, "Failed to register wifi routes");
+    ESP_RETURN_ON_ERROR(http_server_register_mpx_market_routes(s_ctx.server), TAG, "Failed to register marketplace routes");
+#if CONFIG_APP_CLAW_CAP_LUA
+    ESP_RETURN_ON_ERROR(http_server_register_mpx_lua_routes(s_ctx.server), TAG, "Failed to register lua routes");
+#endif
 #endif
     ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),
                         TAG, "Failed to register captive 404 handler");

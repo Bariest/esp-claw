@@ -193,6 +193,13 @@ static esp_err_t main_get_wifi_status(http_server_wifi_status_t *status)
     status->ap_ssid = wifi_status.ap_ssid;
     status->ap_ip = wifi_status.ap_ip;
     status->wifi_mode = wifi_status.mode;
+    status->sta_configured = wifi_status.sta_configured;
+    /* The SSID comes from the saved config rather than the radio, which does
+     * not expose it -- but only while the radio is actually carrying it.
+     * Reporting a name that /v1/wifi/disconnect just took off the air would
+     * have the setup screen showing a network the robot is not on. */
+    status->sta_ssid = (s_config && (wifi_status.sta_configured || wifi_status.sta_connected))
+                       ? s_config->wifi_ssid : "";
     return ESP_OK;
 }
 
@@ -208,6 +215,72 @@ static esp_err_t main_restart_device(void)
     BaseType_t ok = xTaskCreate(main_restart_task, "http_restart", 2048, NULL, 5, NULL);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "Failed to create restart task");
     return ESP_OK;
+}
+
+/* ── Live Wi-Fi control for the PWA's setup screen ─────────────────────────
+ *
+ * ESP-Claw's /api/config saves credentials and asks for a reboot. The PWA does
+ * not reboot: the phone running it is normally joined to the robot's own AP,
+ * so a restart mid-setup drops it off the network and leaves the user on a
+ * page that cannot reload. These three apply the change to the radio as well,
+ * and the setup screen polls /v1/wifi/status for the outcome.
+ *
+ * Credentials still travel through main_save_config, so validation and the
+ * running Claw config see them exactly as they would from the settings page.
+ */
+static esp_err_t main_wifi_apply(const char *sta_ssid, const char *sta_password)
+{
+    ESP_RETURN_ON_FALSE(s_config, ESP_ERR_INVALID_STATE, TAG, "config not loaded");
+
+    /* The AP half is passed every time because apply_sta_config replaces the
+     * whole configuration: omitting it would silently rename the robot's own
+     * access point back to the default while joining a network. */
+    return wifi_manager_apply_sta_config(&(wifi_manager_config_t) {
+        .sta_ssid = sta_ssid,
+        .sta_password = sta_password,
+        .ap_ssid = s_config->ap_ssid[0] ? s_config->ap_ssid : NULL,
+        .ap_password = s_config->ap_password[0] ? s_config->ap_password : NULL,
+        .ap_behavior = s_config->ap_behavior,
+    });
+}
+
+static esp_err_t main_wifi_connect(const char *ssid, const char *password)
+{
+    ESP_RETURN_ON_FALSE(s_config, ESP_ERR_INVALID_STATE, TAG, "config not loaded");
+    ESP_RETURN_ON_FALSE(ssid && ssid[0], ESP_ERR_INVALID_ARG, TAG, "ssid is empty");
+
+    strlcpy(s_config->wifi_ssid, ssid, sizeof(s_config->wifi_ssid));
+    strlcpy(s_config->wifi_password, password ? password : "", sizeof(s_config->wifi_password));
+    ESP_RETURN_ON_ERROR(main_save_config(s_config), TAG, "Failed to save Wi-Fi credentials");
+
+    ESP_LOGI(TAG, "Joining Wi-Fi network %s", ssid);
+    return main_wifi_apply(s_config->wifi_ssid, s_config->wifi_password);
+}
+
+/* Drop the station link and stay dropped.
+ *
+ * esp_wifi_disconnect() on its own would not do it: wifi_manager arms a
+ * reconnect timer from the disconnect event, so the robot would rejoin within
+ * seconds and the button would look broken. Reapplying with no station SSID is
+ * what actually takes the radio back to AP-only. NVS is untouched, so the next
+ * boot -- or the next /v1/wifi/connect -- reconnects. */
+static esp_err_t main_wifi_disconnect(void)
+{
+    ESP_LOGI(TAG, "Dropping Wi-Fi station link (credentials kept)");
+    return main_wifi_apply(NULL, NULL);
+}
+
+static esp_err_t main_wifi_forget(void)
+{
+    ESP_RETURN_ON_FALSE(s_config, ESP_ERR_INVALID_STATE, TAG, "config not loaded");
+
+    ESP_LOGW(TAG, "Forgetting Wi-Fi credentials for %s",
+             s_config->wifi_ssid[0] ? s_config->wifi_ssid : "(none)");
+    s_config->wifi_ssid[0] = '\0';
+    s_config->wifi_password[0] = '\0';
+    ESP_RETURN_ON_ERROR(main_save_config(s_config), TAG, "Failed to clear Wi-Fi credentials");
+
+    return main_wifi_apply(NULL, NULL);
 }
 
 #if CONFIG_APP_CLAW_CAP_IM_WECHAT
@@ -470,6 +543,9 @@ void app_main(void)
             .save_config = main_save_config,
             .get_wifi_status = main_get_wifi_status,
             .restart_device = main_restart_device,
+            .wifi_connect = main_wifi_connect,
+            .wifi_disconnect = main_wifi_disconnect,
+            .wifi_forget = main_wifi_forget,
 #if CONFIG_APP_CLAW_CAP_IM_WECHAT
             .wechat_login_start = main_wechat_login_start,
             .wechat_login_get_status = main_wechat_login_get_status,

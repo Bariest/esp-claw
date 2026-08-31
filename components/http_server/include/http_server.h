@@ -21,6 +21,11 @@ typedef struct {
     const char *ap_ssid;
     const char *ap_ip;
     const char *wifi_mode;
+    /* The PWA's setup screen reports three states, not one flag: a robot that
+     * has credentials but has not joined yet is "connecting", which is the
+     * state the user spends the most time looking at. */
+    bool sta_configured;
+    const char *sta_ssid;
 } http_server_wifi_status_t;
 
 typedef struct {
@@ -43,6 +48,11 @@ typedef struct {
     esp_err_t (*save_config)(const app_config_t *config);
     esp_err_t (*get_wifi_status)(http_server_wifi_status_t *status);
     esp_err_t (*restart_device)(void);
+    /* Applied live rather than on the next boot -- see
+     * http_server_mpx_wifi_api.c for why the PWA needs that. */
+    esp_err_t (*wifi_connect)(const char *ssid, const char *password);
+    esp_err_t (*wifi_disconnect)(void);
+    esp_err_t (*wifi_forget)(void);
     esp_err_t (*wechat_login_start)(const char *account_id, bool force);
     esp_err_t (*wechat_login_get_status)(http_server_wechat_login_status_t *status);
     esp_err_t (*wechat_login_cancel)(void);

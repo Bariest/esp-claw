@@ -41,8 +41,15 @@ if(CONFIG_MP4_ROBOT_ENABLE)
         "http_server_mpx_robot_api.c"
         "http_server_mpx_skills_api.c"
         "http_server_mpx_fs_api.c"
-        "http_server_mpx_studio_api.c")
-    list(APPEND http_server_requires mpx_robot mpx_wasm mpx_util fatfs)
+        "http_server_mpx_studio_api.c"
+        "http_server_mpx_wifi_api.c"
+        "http_server_mpx_market_api.c")
+    list(APPEND http_server_requires mpx_robot mpx_wasm mpx_util fatfs esp_http_client)
+    if(CONFIG_APP_CLAW_CAP_LUA)
+        # The PWA's /v1/lua store, backed by ESP-Claw's Lua runtime.
+        list(APPEND http_server_srcs "http_server_mpx_lua_api.c")
+        list(APPEND http_server_requires cap_lua)
+    endif()
 endif()
 
 if(CONFIG_APP_CLAW_LUA_MODULE_HTTP_SERVER)

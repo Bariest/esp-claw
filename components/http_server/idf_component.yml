@@ -26,3 +26,10 @@ dependencies:
     rules:
       - if: $CONFIG{MP4_ROBOT_ENABLE} == True
     path: ../mpx_util
+
+  # /v1/lua is a front door onto ESP-Claw's Lua runtime, not a second one.
+  cap_lua:
+    rules:
+      - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+      - if: $CONFIG{APP_CLAW_CAP_LUA} == True
+    path: ../../third-party/esp-claw/components/claw_capabilities/cap_lua
