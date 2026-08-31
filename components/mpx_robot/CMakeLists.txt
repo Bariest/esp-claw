@@ -14,8 +14,15 @@ idf_component_register(
         "src/mpx_imu.cc"
         "src/mpx_robot_c_api.cc"
     INCLUDE_DIRS
+        # "src" is public, not private, and that is a deliberate exception.
+        #
+        # mpx_wasm's host functions are the skill ABI: 48 distinct robot::
+        # symbols including the per-leg IK, the raw servo reads and the bus
+        # lock. Wrapping all of that in C to keep robot.h private would be a
+        # few hundred lines of pure name translation protecting a boundary
+        # that the ABI has already made permanent. Everything that is NOT the
+        # skill runtime should still include only mpx_robot.h.
         "include"
-    PRIV_INCLUDE_DIRS
         "src"
     REQUIRES
         esp_board_manager

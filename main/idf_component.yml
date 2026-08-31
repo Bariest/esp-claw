@@ -60,3 +60,13 @@ dependencies:
     rules:
     - if: $CONFIG{MP4_ROBOT_ENABLE} == True
     path: ../components/mpx_robot
+
+  mpx_util:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_util
+
+  mpx_wasm:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_wasm

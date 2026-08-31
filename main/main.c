@@ -31,6 +31,7 @@
 #include "app_config.h"
 #if CONFIG_MP4_ROBOT_ENABLE
 #include "mpx_robot.h"
+#include "mpx_wasm.h"
 #endif
 
 #define APP_ENABLE_MEM_LOG        (0)
@@ -356,6 +357,14 @@ void app_main(void)
     if (!mpx_robot_init()) {
         ESP_LOGW(TAG, "Robot init failed - continuing without servos");
     }
+
+    /* WAMR, the 74 host functions, and the hook table mpx_robot asks through.
+     * Needs mpx_robot up first. Not fatal either: a device that cannot run
+     * skills is still a usable robot. */
+    if (!mpx_wasm_init()) {
+        ESP_LOGW(TAG, "WASM runtime init failed - skills unavailable");
+    }
+
 #endif
 
 
@@ -436,6 +445,20 @@ void app_main(void)
     ESP_ERROR_CHECK(app_claw_start(s_claw_config));
 #if CONFIG_APP_CLAW_CAP_IM_LOCAL
     ESP_ERROR_CHECK(http_server_webim_bind_im());
+#endif
+
+#if CONFIG_MP4_ROBOT_ENABLE
+    /* Scan the skills directory, start the IMU event watcher, and run the
+     * autorun skill -- deliberately the last thing that happens.
+     *
+     * An autorun skill that crashes the robot runs again on the next boot,
+     * and the next. A user with no serial cable then has a brick, and the
+     * thing that bricked it arrived from a marketplace. By this point the
+     * web server is listening and the agent is up, so they can always
+     * uninstall it. That is the difference between a bad skill and a brick,
+     * and it is the whole reason this call is here and not next to
+     * mpx_wasm_init(). */
+    mpx_wasm_start_skills();
 #endif
 
     register_wifi_command();
