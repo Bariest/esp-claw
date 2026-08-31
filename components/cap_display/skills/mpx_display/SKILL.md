@@ -25,13 +25,19 @@ room, a reaction on the screen is most of what makes it feel alive, and it
 costs one tool call. Show a face when the mood of the conversation changes,
 not on every message.
 
+The face is the robot's resting screen: two large yellow eyes that blink on
+their own every few seconds. It is always there, so `display_show_emotion` is
+not "put something on the screen" — it is "change the expression the robot is
+already wearing", and it animates from the current one.
+
 `display_show_emotion` takes: `neutral`, `happy`, `excited`, `sad`, `sleepy`,
-`angry`, `surprised`, `love`, `confused`, `wink`. They render as large ASCII
-faces — deliberately, so they read from across a room and cost no font.
+`angry`, `surprised`, `love`, `confused`, `wink`. `sleepy` and `wink` stop the
+idle blinking, which is the point of them.
 
 `display_show_text` is for short things: a name, a number, a status word. It
-is centred and scaled to fill the panel, so a paragraph becomes unreadable.
-A few words at most.
+is centred and scaled to fill the panel, so a paragraph becomes unreadable —
+a few words at most. It borrows the screen for about eight seconds and then
+the face comes back on its own, so you never need to clear it afterwards.
 
 ## Brightness
 
@@ -42,9 +48,13 @@ message goes to a dark screen and looks like a failure.
 
 ## Getting out of the way
 
-`display_clear` returns the panel to the normal device UI. Do it when the
-thing you were showing has stopped being true. Leaving a stale face up is
-worse than showing nothing.
+`display_clear` drops a message early and goes straight back to the resting
+face. You rarely need it, since text times out by itself — reach for it when
+what you put up has stopped being true sooner than you expected.
+
+There is no way to blank the panel from here, and that is deliberate: a dark
+screen on a robot reads as a crash. Use `display_set_brightness` with 0 if
+someone actually wants the light off.
 
 The screen is shared, not owned: a running robot skill can draw over anything
 you put there, and that is correct — the skill is the thing the user is

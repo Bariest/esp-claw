@@ -6,13 +6,13 @@
  *
  * Two decisions worth explaining.
  *
- * Emotions are ASCII faces, not bitmaps or an emoji font. A font with emoji
- * coverage is hundreds of kilobytes of flash for something a robot dog does
- * not need to be subtle about, and bitmaps would have to be authored, stored
- * and kept in step with the panel size. "^_^" scaled up to fill a 320x240
- * screen reads perfectly from across a room, costs nothing, and works with
- * whatever font LVGL already has. It also degrades gracefully if the panel is
- * ever changed.
+ * Emotions are a drawn face, not bitmaps and not an emoji font. Both of those
+ * cost flash for something whose every frame is two rounded rectangles; see
+ * cap_display_face.c, which owns the geometry and the animation. What matters
+ * here is that the face is this robot's home screen, so the tools below move
+ * it rather than take the panel over: showing a message borrows the screen and
+ * gives it back, and clearing returns to the face rather than to a blank
+ * panel that looks like a crash.
  *
  * The session is SHARED_LVGL, not EXCLUSIVE. Exclusive would fight the system
  * UI and any Lua skill that wants to draw; shared means the last writer wins
@@ -21,6 +21,7 @@
  */
 
 #include "cap_display.h"
+#include "cap_display_face.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -42,39 +43,12 @@ static const char *TAG = "cap_display";
 #define CAP_DISPLAY_TEXT_MAX 128
 #define CAP_DISPLAY_BRIGHTNESS_DEVICE "lcd_brightness"
 
+#define CAP_DISPLAY_TEXT_HOLD_MS 8000
+
 static display_service_session_handle_t s_session;
-static lv_obj_t *s_screen;
-static lv_obj_t *s_label;
-
-/* ── Emotions ──────────────────────────────────────────────────────────── */
-
-typedef struct {
-    const char *name;
-    const char *face;
-} cap_display_emotion_t;
-
-static const cap_display_emotion_t s_emotions[] = {
-    { "neutral",   "-  -"  },
-    { "happy",     "^  ^"  },
-    { "excited",   "^ o ^" },
-    { "sad",       "T  T"  },
-    { "sleepy",    "-  -"  },
-    { "angry",     ">  <"  },
-    { "surprised", "O  O"  },
-    { "love",      "*  *"  },
-    { "confused",  "?  ?"  },
-    { "wink",      "^  -"  },
-};
-
-static const char *emotion_face(const char *name)
-{
-    for (size_t i = 0; i < sizeof(s_emotions) / sizeof(s_emotions[0]); i++) {
-        if (strcasecmp(name, s_emotions[i].name) == 0) {
-            return s_emotions[i].face;
-        }
-    }
-    return NULL;
-}
+static lv_obj_t   *s_text_screen;
+static lv_obj_t   *s_label;
+static lv_timer_t *s_text_timer;
 
 /* ── The screen ────────────────────────────────────────────────────────── */
 
@@ -102,11 +76,37 @@ static esp_err_t ensure_session(void)
     return ESP_OK;
 }
 
-/* Paint `text`, scaled to fill the panel. Caller must NOT hold the LVGL lock:
- * this takes it. */
-static esp_err_t paint(const char *text)
+/* Put the face back on the panel. Caller holds the LVGL lock. */
+static esp_err_t show_face_locked(void)
+{
+    lv_obj_t *face = cap_display_face_screen_locked();
+
+    if (!face) {
+        return ESP_ERR_NO_MEM;
+    }
+    return display_service_session_load_screen_locked(s_session, face);
+}
+
+static void text_expired_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    /* Already inside LVGL, so the lock is held. */
+    (void)show_face_locked();
+    s_text_timer = NULL;
+}
+
+/* Show `text` scaled to fill the panel, then hand the screen back to the face.
+ *
+ * The hand-back is the point. The face is the robot's resting state, so a
+ * message is something it says and stops saying -- without the timer, one
+ * display_show_text call would leave a wall of words up until the next tool
+ * call, which on a quiet robot could be hours.
+ *
+ * Caller must NOT hold the LVGL lock: this takes it. */
+static esp_err_t paint_text(const char *text)
 {
     esp_err_t err = ensure_session();
+
     if (err != ESP_OK) {
         return err;
     }
@@ -114,16 +114,16 @@ static esp_err_t paint(const char *text)
         return ESP_ERR_TIMEOUT;
     }
 
-    if (s_screen == NULL) {
-        s_screen = lv_obj_create(NULL);
-        if (s_screen == NULL) {
+    if (s_text_screen == NULL) {
+        s_text_screen = lv_obj_create(NULL);
+        if (s_text_screen == NULL) {
             display_service_unlock();
             return ESP_ERR_NO_MEM;
         }
-        lv_obj_set_style_bg_color(s_screen, lv_color_black(), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_text_screen, lv_color_black(), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(s_text_screen, LV_OPA_COVER, LV_PART_MAIN);
 
-        s_label = lv_label_create(s_screen);
+        s_label = lv_label_create(s_text_screen);
         lv_obj_set_style_text_color(s_label, lv_color_white(), LV_PART_MAIN);
         lv_label_set_long_mode(s_label, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(s_label, lv_pct(90));
@@ -132,9 +132,57 @@ static esp_err_t paint(const char *text)
     }
 
     lv_label_set_text(s_label, text);
-    err = display_service_session_load_screen_locked(s_session, s_screen);
+    err = display_service_session_load_screen_locked(s_session, s_text_screen);
+
+    if (s_text_timer) {
+        lv_timer_reset(s_text_timer);
+    } else {
+        s_text_timer = lv_timer_create(text_expired_cb, CAP_DISPLAY_TEXT_HOLD_MS, NULL);
+        if (s_text_timer) {
+            lv_timer_set_repeat_count(s_text_timer, 1);
+        }
+    }
     display_service_unlock();
     return err;
+}
+
+/* ── Boot ──────────────────────────────────────────────────────────────── */
+
+esp_err_t cap_display_face_start(void)
+{
+    esp_err_t err = ensure_session();
+
+    if (err != ESP_OK) {
+        /* A board with no panel is a normal configuration, not a failure. */
+        ESP_LOGI(TAG, "no display on this board; face not started");
+        return ESP_OK;
+    }
+    if (display_service_lock() != ESP_OK) {
+        return ESP_ERR_TIMEOUT;
+    }
+    err = show_face_locked();
+    display_service_unlock();
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "face is up");
+    }
+    return err;
+}
+
+void cap_display_face_set_network(bool sta_connected, const char *ap_ssid, const char *ip)
+{
+    char line[64];
+
+    /* What someone standing in front of the robot needs, in the order they
+     * need it: before joining, the AP name; after, the address to type. */
+    if (sta_connected && ip && ip[0]) {
+        snprintf(line, sizeof(line), "%s", ip);
+    } else if (ap_ssid && ap_ssid[0]) {
+        snprintf(line, sizeof(line), "join %s", ap_ssid);
+    } else {
+        snprintf(line, sizeof(line), "no network");
+    }
+    (void)cap_display_face_set_status(line);
 }
 
 /* ── Tools ─────────────────────────────────────────────────────────────── */
@@ -166,7 +214,7 @@ static esp_err_t execute_show_text(const char *input_json,
     snprintf(buf, sizeof(buf), "%s", text->valuestring);
     cJSON_Delete(root);
 
-    if (paint(buf) != ESP_OK) {
+    if (paint_text(buf) != ESP_OK) {
         snprintf(output, output_size,
                  "Error: the display is not available on this device.");
         return ESP_ERR_INVALID_STATE;
@@ -182,8 +230,8 @@ static esp_err_t execute_show_emotion(const char *input_json,
     (void)ctx;
     cJSON *root;
     const cJSON *emotion;
-    const char *face;
     char name[24];
+    esp_err_t err;
 
     if (!input_json || !output || output_size == 0) {
         return ESP_ERR_INVALID_ARG;
@@ -203,22 +251,35 @@ static esp_err_t execute_show_emotion(const char *input_json,
     snprintf(name, sizeof(name), "%s", emotion->valuestring);
     cJSON_Delete(root);
 
-    face = emotion_face(name);
-    if (face == NULL) {
+    if (!cap_display_face_is_emotion(name)) {
         size_t at = (size_t)snprintf(output, output_size,
                                      "Error: no such emotion. Try one of: ");
-        for (size_t i = 0; i < sizeof(s_emotions) / sizeof(s_emotions[0]) &&
-                           at < output_size; i++) {
-            at += (size_t)snprintf(output + at, output_size - at, "%s%s",
-                                   i ? ", " : "", s_emotions[i].name);
+        if (at < output_size) {
+            cap_display_face_emotion_names(output + at, output_size - at);
         }
         return ESP_OK;
     }
 
-    if (paint(face) != ESP_OK) {
+    if (ensure_session() != ESP_OK || cap_display_face_set_emotion(name) != ESP_OK) {
         snprintf(output, output_size,
                  "Error: the display is not available on this device.");
         return ESP_ERR_INVALID_STATE;
+    }
+
+    /* An expression change also cancels any message still on screen: the robot
+     * reacting to what was just said should be visible immediately, not in
+     * eight seconds when the previous text times out. */
+    if (display_service_lock() == ESP_OK) {
+        if (s_text_timer) {
+            lv_timer_delete(s_text_timer);
+            s_text_timer = NULL;
+        }
+        err = show_face_locked();
+        display_service_unlock();
+        if (err != ESP_OK) {
+            snprintf(output, output_size, "Error: could not show the face.");
+            return err;
+        }
     }
     snprintf(output, output_size, "{\"ok\":true,\"emotion\":\"%s\"}", name);
     return ESP_OK;
@@ -231,13 +292,17 @@ static esp_err_t execute_clear(const char *input_json,
     (void)input_json;
     (void)ctx;
 
-    /* Closing the session with RESTORE_DEFAULT_ON_RELEASE puts the system UI
-     * back, rather than leaving a blank screen that looks like a crash. */
-    if (s_session != NULL) {
-        display_service_close(s_session);
-        s_session = NULL;
-        s_screen = NULL;
-        s_label = NULL;
+    /* Back to the face rather than closing the session. The face is this
+     * robot's home screen -- releasing the session would restore ESP-Claw's
+     * launcher, which on a board with no touch controller is a screen nobody
+     * can do anything with. */
+    if (s_session != NULL && display_service_lock() == ESP_OK) {
+        if (s_text_timer) {
+            lv_timer_delete(s_text_timer);
+            s_text_timer = NULL;
+        }
+        (void)show_face_locked();
+        display_service_unlock();
     }
     snprintf(output, output_size, "{\"ok\":true}");
     return ESP_OK;
@@ -339,8 +404,7 @@ static const claw_cap_descriptor_t s_descriptors[] = {
         .name = "display_clear",
         .family = "display",
         .description =
-            "Stop showing text or a face and return the screen to the normal "
-            "device UI.",
+            "Stop showing a message and go back to the robot's resting face.",
         .kind = CLAW_CAP_KIND_CALLABLE,
         .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
         .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",

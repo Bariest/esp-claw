@@ -104,6 +104,12 @@ static void on_wifi_state_changed(bool connected, void *user_ctx)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to update network UI: %s", esp_err_to_name(err));
     }
+
+#if CONFIG_MP4_ROBOT_ENABLE
+    /* The face carries this line itself: system_ui's status bar is on a home
+     * screen this board cannot show. */
+    cap_display_face_set_network(connected, ap_ssid, status.sta_ip);
+#endif
 }
 
 static esp_err_t main_load_config(app_config_t *config)
@@ -535,6 +541,14 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_manager_init());
 
     ESP_ERROR_CHECK(app_claw_ui_start());
+
+#if CONFIG_MP4_ROBOT_ENABLE
+    /* Straight after the display service is up, so the eyes are the first
+     * thing on the panel -- before Wi-Fi, before the agent. On a robot that
+     * takes a few seconds to find a network, a face that is already blinking
+     * is the difference between "booting" and "broken". */
+    ESP_ERROR_CHECK(cap_display_face_start());
+#endif
 
     ESP_ERROR_CHECK(http_server_init(&(http_server_config_t) {
         .storage_base_path = app_fs_storage_base_path(),
