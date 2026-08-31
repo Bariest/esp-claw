@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that no relative path in this repo escapes it.
+"""Pre-build sanity checks for the repo.
 
 Every component ESP-Claw ships carries `path:` dependencies written for its
 position inside the ESP-Claw tree. When one of those components is copied into
@@ -67,6 +67,22 @@ def main():
                     problems.append(
                         f'{os.path.relpath(path, ROOT)}: relative path escapes '
                         f'the repo -> {match}')
+
+    # Empty source files.
+    #
+    # This exists because it happened, twice: a file-normalising one-liner
+    # written as open(p, "wb").write(open(p, "rb").read()) truncates the file
+    # before the read runs, so every file it touches becomes zero bytes. An
+    # empty .cc still compiles cleanly as an empty translation unit, so the
+    # failure surfaces much later as "namespace has not been declared" in a
+    # completely different file.
+    for dirpath, files in walk():
+        for name in files:
+            if not name.endswith(('.c', '.cc', '.h', '.yaml', '.yml')):
+                continue
+            path = os.path.join(dirpath, name)
+            if os.path.getsize(path) == 0:
+                problems.append(f'{os.path.relpath(path, ROOT)}: file is empty')
 
     if problems:
         print('Path problems found:\n')
