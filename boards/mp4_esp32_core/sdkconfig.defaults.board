@@ -48,7 +48,10 @@ CONFIG_APP_CLAW_LUA_MODULE_IMU=n
 
 # The magnetometer is a separate chip with no second owner, so the stock
 # module is fine.
-CONFIG_APP_CLAW_LUA_MODULE_MAGNETOMETER=y
+# The BMM150 sits behind the BMI270's auxiliary master (ASCX/ASDX), not on
+# the main I2C bus, so this module has nothing it can reach. Reading it needs
+# a BMI2_AUX sensor config on the BMI270 instead.
+CONFIG_APP_CLAW_LUA_MODULE_MAGNETOMETER=n
 
 # Quadruped stack
 CONFIG_MP4_ROBOT_ENABLE=y

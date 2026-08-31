@@ -253,6 +253,42 @@ void cleanup()
     }
 }
 
+/* Say which address the chip is actually on, before trying to talk to it.
+ *
+ * bmi270_sensor_create() takes no address -- the driver picks one, and its own
+ * header calls 0x68 "typical". This board straps SDO high, so the chip is on
+ * 0x69. If those disagree, create() fails with a bare ESP_FAIL and no hint
+ * that addressing is the problem, which is a genuinely horrible thing to debug
+ * on a bench with a scope.
+ *
+ * A bus scan costs a few milliseconds once at boot and turns that into a
+ * sentence. It also prints every other device on the bus, which is the first
+ * thing anyone wants when a board is new.
+ */
+void probe_i2c(int8_t declared_addr)
+{
+    uint8_t found[16] = {0};
+    char list[96];
+    size_t at = 0;
+    bool at_declared = false;
+    uint8_t n = i2c_bus_scan(s_i2c_bus, found, sizeof(found));
+
+    for (uint8_t i = 0; i < n && at + 6 < sizeof(list); i++) {
+        at += (size_t)snprintf(list + at, sizeof(list) - at, "%s0x%02X",
+                               i ? " " : "", found[i]);
+        if (found[i] == (uint8_t)declared_addr) {
+            at_declared = true;
+        }
+    }
+    ESP_LOGI(TAG, "I2C scan: %u device(s) [%s]", (unsigned)n, n ? list : "none");
+
+    if (!at_declared) {
+        ESP_LOGW(TAG, "Nothing answered at 0x%02X, the address board_devices.yaml "
+                      "declares for the BMI270 -- check the SDO strap",
+                 (unsigned)(uint8_t)declared_addr);
+    }
+}
+
 }  // namespace
 
 bool imu_init()
@@ -285,6 +321,8 @@ bool imu_init()
         return false;
     }
 
+    probe_i2c(cfg->i2c_addr);
+
     /* bmi270_sensor_create() uploads the ~8 KB configuration blob, which is
      * why board_devices.yaml marks this device init_skip: true and we do it
      * here rather than on the board manager's boot path.                  */
@@ -292,6 +330,9 @@ bool imu_init()
                                BMI2_GYRO_CROSS_SENS_ENABLE | BMI2_CRT_RTOSK_ENABLE);
     if (err != ESP_OK || s_sensor == nullptr) {
         ESP_LOGE(TAG, "bmi270_sensor_create failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "If the scan above found the chip at an address other "
+                      "than the one this driver uses, that is the reason: "
+                      "bmi270_sensor_create() takes no address argument.");
         cleanup();
         return false;
     }

@@ -133,26 +133,31 @@ devices:
     version: 1.0.0
     init_skip: true
     config:
-      i2c_addr: 0x68
+      # SDO is strapped to VDDIO through R50 (2.2k), so the chip answers on
+      # the secondary address. The schematic spells this out next to U15:
+      # "SDO=GND 0x68, SDO=VDDIO 0x69". M5's CoreS3, which wires the same
+      # BMI270 + BMM150 pair the same way, likewise uses BMI2_I2C_SEC_ADDR.
+      i2c_addr: 0x69
       frequency: 400000
-      int_gpio_num: 10
-      sdo_gpio_num: -1
-    peripherals:
-      - name: i2c_master
-
-  # BMM150 magnetometer, same bus. No interrupt line is routed.
-  - name: magnetometer_sensor
-    chip: bmm150
-    type: custom
-    version: 1.0.0
-    init_skip: true
-    config:
-      i2c_addr: 0x10
-      frequency: 400000
+      # INT1 (pin 4) and INT2 (pin 9) are both left unconnected on this board,
+      # so there is no data-ready line to wait on -- mpx_imu polls instead.
       int_gpio_num: -1
       sdo_gpio_num: -1
     peripherals:
       - name: i2c_master
+
+  # The BMM150 magnetometer is deliberately NOT declared here.
+  #
+  # It is not on this I2C bus. Its SCK and SDI go to BMM_SCL and BMM_SDA,
+  # which come from the BMI270's ASCX (pin 3) and ASDX (pin 2) -- the
+  # accelerometer's own auxiliary master. Nothing on i2c_master can address
+  # it, so a device entry here would hand out a handle that can never reach
+  # the chip.
+  #
+  # To use it, configure the BMI270's aux interface: a BMI2_AUX sensor
+  # config with cfg.aux.i2c_device_addr = 0x10, and read the magnetometer
+  # through the BMI270 rather than around it. M5CoreS3IMU's bmi2auxClass is
+  # a working example of exactly this arrangement.
 
   # --------------------------------------------------------------- buttons
   # Two momentary buttons to ground: BOOT (SW2, also strapping) and WAKE (SW3).
