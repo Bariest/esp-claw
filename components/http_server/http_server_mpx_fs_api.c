@@ -65,14 +65,24 @@ static esp_err_t fs_list_handler(httpd_req_t *req)
     }
 
     while ((ent = readdir(dir)) != NULL) {
-        char child[HTTP_SERVER_PATH_MAX];
+        char child_rel[HTTP_SERVER_PATH_MAX];
+        char child_full[HTTP_SERVER_PATH_MAX];
         struct stat st;
 
         if (ent->d_name[0] == '.') {
             continue;
         }
-        snprintf(child, sizeof(child), "%s/%s", full, ent->d_name);
-        if (stat(child, &st) != 0) {
+        /* Build the child path with ESP-Claw's own helpers rather than
+         * snprintf. Both bounds-check and fail rather than truncate, so an
+         * entry whose path will not fit is skipped -- which is correct, since
+         * a path we cannot compose is one we could not have opened either. */
+        if (!http_server_build_child_relative_path(rel, ent->d_name,
+                                                   child_rel, sizeof(child_rel)) ||
+                http_server_resolve_storage_path(child_rel, child_full,
+                                                 sizeof(child_full)) != ESP_OK) {
+            continue;
+        }
+        if (stat(child_full, &st) != 0) {
             continue;
         }
         if (S_ISDIR(st.st_mode)) {
