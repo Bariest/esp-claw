@@ -133,16 +133,20 @@ devices:
     version: 1.0.0
     init_skip: true
     config:
-      # U11 pin 1 (SDO) is pulled to 3V3 through R48 (10k), so the chip answers
-      # on the secondary address. Verified on MP4ESP32_CORE_SCH_0827 sheet 2.
-      # M5's CoreS3 wires the same BMI270 + BMM150 pair the same way and its
-      # driver likewise uses BMI2_I2C_SEC_ADDR.
-      i2c_addr: 0x69
+      # U11 pin 1 (SDO) ties to GND, so this is the PRIMARY address.
+      #
+      # Read this off sheet 2 at high magnification, after getting it wrong
+      # twice. R48 (10k to 3V3) is a pull-up on pin 4 (INT1) -- the IO10_INT1
+      # net -- not on SDO. Do not take M5 CoreS3 as evidence here: it wires
+      # the same BMI270 + BMM150 pair but straps SDO high and so uses
+      # BMI2_I2C_SEC_ADDR (0x69). Copying that would break this board.
+      i2c_addr: 0x68
       frequency: 400000
-      # INT1 (pin 4) goes to GPIO10 as net IO10_INT1. INT2 (pin 9) is the one
-      # left unconnected, along with OCSB and OSDO. mpx_imu polls at 20 Hz and
-      # does not use the line, but it is declared so nothing else claims the
-      # pin.
+      # INT1 (pin 4) goes to GPIO10 as net IO10_INT1, with R48 pulling it to
+      # 3V3. INT2 (pin 9) is unconnected, along with OCSB and OSDO. mpx_imu
+      # polls at 20 Hz and does not use the line, but it is declared so
+      # nothing else claims the pin -- and the pull-up means the BMI270 may
+      # drive it open-drain if the data-ready interrupt is ever wired up.
       int_gpio_num: 10
       sdo_gpio_num: -1
     peripherals:
