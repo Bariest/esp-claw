@@ -46,9 +46,23 @@ idf.py -p PORT flash monitor
 `idf.py set-target` is not needed -- the target comes from `chip:` in
 `boards/mp4_esp32_core/board_info.yaml`.
 
-**Rerun `idf.py bmgr` after every edit to a board YAML file.** Otherwise the
-stale generated C under `components/gen_bmgr_codes/` is compiled instead, and
-nothing tells you.
+**Rerun `idf.py bmgr` after editing anything under `boards/`** -- not only the
+YAML. `sdkconfig.defaults.board` is copied into the generated
+`components/gen_bmgr_codes/board_manager.defaults`, and only that generated
+file is on `SDKCONFIG_DEFAULTS`. Edit the board defaults without rerunning
+bmgr and your settings are simply absent, with nothing to say so.
+
+Config defaults also only apply to a **fresh** `sdkconfig`. An existing one
+wins, so a new default silently does nothing:
+
+```bash
+idf.py bmgr -c ./boards -b mp4_esp32_core   # regenerate board_manager.defaults
+rm sdkconfig                                # let the defaults be read again
+idf.py build
+```
+
+Deleting `sdkconfig` discards anything set through menuconfig -- the LLM API
+key and `MP4_GATEWAY_HOST` being the ones that matter here.
 
 The console is the CH340K on UART0, not USB-Serial-JTAG.
 
