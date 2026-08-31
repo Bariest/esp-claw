@@ -1,149 +1,115 @@
-# Agents.md
+# AGENTS.md
 
-This file provides guidance to agents when working with code in this repository.
+Firmware for the MangDang MP4 ESP32 CORE quadruped, built on ESP-Claw.
 
-## Project Overview
+## The one rule
 
-ESP-Claw is an ESP-IDF firmware project for running an AI agent framework on Espressif IoT devices. The main application is `application/edge_agent/`; reusable firmware components live under `components/`. The repo also contains board definitions, build-time FATFS content, documentation, and the embedded device settings UI.
+**Never edit anything under `third-party/esp-claw/`.** It is a pinned git
+submodule. Everything this repo adds hangs off documented extension points, so
+taking an upstream update is a submodule bump rather than a merge. If you find
+yourself wanting to change an ESP-Claw file, the answer is almost always one
+of: a capability group, a Lua module, a skill, a router rule, a board overlay,
+or a component that shadows the ESP-Claw one by name.
 
-## Development Commands
+ESP-Claw's own agent guide lives at `third-party/esp-claw/AGENTS.md` and is
+worth reading for anything about the agent runtime itself.
 
-Export ESP-IDF before firmware work:
+## Layout
 
-```bash
-. $IDF_PATH/export.sh
+```
+CMakeLists.txt            project root
+boards/mp4_esp32_core/    board definition (ST7789, ES7210, MAX98357A, BMI270)
+components/               product-owned components
+  app_config/             persisted settings, projected into app_claw_config_t
+  http_server/            device config server + embedded UI (shadows ESP-Claw's)
+  cmd_wifi/               console wifi command
+  mpx_robot/              the quadruped: servos, gait, IK, IMU
+main/                     app entry point and service wiring
+fatfs_image/              baked into the SYSTEM (read-only) and DATA (seed) partitions
+third-party/esp-claw/     ESP-Claw, pinned submodule -- DO NOT EDIT
+tools/cmake/              partition selection, ESP-IDF patches
+.agents/                  design notes, including the integration plan
 ```
 
-Generate board manager files and build from the app directory:
+## Build
 
 ```bash
-cd application/edge_agent
-idf.py bmgr -c ./boards -b esp32_S3_DevKitC_1
+source /path/to/esp-idf/export.sh
+python -m pip install -r requirements.txt
+git submodule update --init --recursive
+
+idf.py bmgr -c ./boards -b mp4_esp32_core
 idf.py build
-idf.py flash monitor
+idf.py -p PORT flash monitor
 ```
 
-Docs site:
+`idf.py set-target` is not needed -- the target comes from `chip:` in
+`boards/mp4_esp32_core/board_info.yaml`.
 
-```bash
-cd docs
-pnpm install
-pnpm build
-pnpm dev
-```
+**Rerun `idf.py bmgr` after every edit to a board YAML file.** Otherwise the
+stale generated C under `components/gen_bmgr_codes/` is compiled instead, and
+nothing tells you.
 
-Embedded settings UI:
+The console is the CH340K on UART0, not USB-Serial-JTAG.
 
-```bash
-cd application/edge_agent/components/http_server/frontend_source
-pnpm build
-pnpm typecheck
-```
+## How ESP-Claw components enter the build
 
-## High-Level Architecture
+Through IDF Component Manager `path:` dependencies in `main/idf_component.yml`,
+not `EXTRA_COMPONENT_DIRS`. Two idioms:
 
-### Boot and Runtime Flow
+- `rules:` -- hard requirement gated on a Kconfig symbol; the dependency is
+  absent when the condition is false.
+- `matches:` -- optional inclusion when the condition holds.
 
-The main entry point is `application/edge_agent/main/main.c`. 
+## Extension points
 
-### Core Data Flow
+These are the seams. Prefer them in this order.
 
-1. IM channels, scheduler jobs, Lua scripts, startup hooks, or CLI commands publish events or submit requests.
-2. `claw_event_router` matches events against the DATA root's `router_rules/router_rules.json` and can call capabilities, run scripts, run the agent, send messages, emit events, or drop events.
-3. `claw_core` builds context from memory, session history, skills, and other providers; calls the configured LLM backend; executes capability tool calls; persists context; and returns responses.
-4. Outbound messages are routed back through registered IM bindings or local/web channels.
+| Want to | Use |
+|---|---|
+| Give the agent a new tool | a capability group, registered with `app_capabilities_register_external_group()` from `app_main` **before** `app_claw_start()` |
+| Give Lua a new module | `cap_lua_register_module(name, luaopen_fn)`, called from the module's own component |
+| Give the agent long instructions | a `skills/<id>/SKILL.md` in your component; the build syncs it into the SYSTEM image automatically |
+| Receive agent replies on your channel | `claw_event_router_register_outbound_binding(channel, "<send_handler>")` |
+| Describe hardware | the board YAML, not C |
 
-## Key Subsystems
+Capability descriptions are truncated at **256 bytes** (`CLAW_CAP_TOOL_DESCRIPTION_MAX`).
+Long instructions belong in a SKILL.md, not the descriptor.
 
-- **Application shell** (`application/edge_agent/main/main.c`, `components/common/app_claw/`): boot flow, storage paths, capability registration, Lua module registration, CLI, and agent startup.
-- **Agent core** (`components/claw_modules/claw_core/`): request queue, context building, LLM backend runtime, tool-call loop, media inference, interrupts, context persistence, and response delivery.
-- **Event router** (`components/claw_modules/claw_event_router/`): declarative event routing and actions backed by router rules in FATFS.
-- **Capability registry** (`components/claw_modules/claw_cap/`): common registration and dispatch layer for model-callable capabilities.
-- **Capabilities** (`components/claw_capabilities/`): concrete agent capabilities such as Lua execution, files, IM platforms, MCP, skill management, router management, scheduler, session management, time, HTTP requests, web search, system, and LLM inspection.
-- **Memory** (`components/claw_modules/claw_memory/`): session history, profile/long-term memory providers, memory persistence, request gating, and stage notes.
-- **Skills** (`components/claw_modules/claw_skill/`, component `skills/` directories): user-facing skill documents and activation state.
-- **Lua modules** (`components/lua_modules/`): Lua drivers and higher-level modules for hardware, media, HTTP server, storage, threading, JSON, board manager, and capability calls.
-- **Board manager** (`application/edge_agent/boards/`): board metadata, peripheral YAML, board setup code, board defaults, optional local components, and optional board FATFS overlays.
-- **FATFS images** (`application/edge_agent/fatfs_image/`): build-time source trees for the read-only SYSTEM image and writable DATA seed image.
-- **HTTP config service** (`application/edge_agent/components/http_server/`): local device configuration server and embedded frontend.
+## Runtime paths
 
-### Runtime Path Rules
+Never hard-code `/fatfs` or `/system`. Compose paths with
+`claw_paths_join(CLAW_PATH_DATA, ...)` / `claw_paths_join(CLAW_PATH_SYSTEM, ...)`.
+DATA may live on flash or an SD card depending on the board.
 
-The firmware uses two logical filesystem roots, configured at boot through `claw_paths`:
+## Board YAML gotchas
 
-- `CLAW_PATH_SYSTEM` is mounted at `/system`. It is read-only and contains firmware-baked skills, skill assets, built-in Lua modules, Lua docs/tests, board image overlays, and `.recovery` seed files.
-- `CLAW_PATH_DATA` is the writable storage root. It is `/fatfs` when flash storage is used, or the board-manager SD card mount point when an SD card is available.
-- Never hard-code `/fatfs` for writable paths in reusable code or docs. Use `claw_paths_join(CLAW_PATH_DATA, ...)` in C and `storage.get_root_dir()` plus `storage.join_path(...)` in Lua.
-- Firmware-baked skill scripts must be referenced with `{CUR_SKILL_DIR}/scripts/...` inside `SKILL.md`; do not write fixed `/fatfs/skills/...` paths.
-- Runtime-installed/user skills live under the DATA root's `skills/`. Firmware-baked skills live under `/system/skills/`; the skill registry scans both, with DATA skills taking priority when ids conflict.
-- Router rules, scheduler rules, memory, sessions, inbox, and user-generated files live under DATA. Recovery defaults are stored under `/system/.recovery` and copied into DATA only when missing.
-- Built-in Lua libraries are staged under `/system/scripts/builtin/lib`; generated Lua module docs/tests are bundled into the `builtin_lua_modules` skill and should be accessed via that skill's `{CUR_SKILL_DIR}` paths.
-- Board-specific `boards/<vendor>/<board>/fatfs_image/` content overlays the SYSTEM image at build time. Board image content does not target DATA and hidden board folders are not considered.
+- The generator emits `custom` device struct fields **in YAML order** and
+  silently omits absent keys. A consuming C mirror struct must match field for
+  field; use `-1` for unused GPIOs rather than dropping the key. A mismatch
+  shows up as `ESP_ERR_INVALID_SIZE` at runtime if the consumer checks
+  `cfg_size`, and as garbage if it does not.
+- A scalar's C type is chosen from the literal's magnitude. Keep masks as
+  strings.
+- Device names are load-bearing: `display_lcd`, `lcd_touch`, `audio_dac`,
+  `audio_adc`, `imu_sensor`, `magnetometer_sensor`, `fs_sdcard`,
+  `lcd_brightness`.
 
-## Project-Specific Notes
+## This board, specifically
 
-- Architecture constraints: [`design.md`](.agents/design.md)
-- docs guide: [`docs.md`](.agents/docs.md)
-- Common gotchas: [`gotchas.md`](.agents/gotchas.md)
-- Specs (`.agents/spec/`):
-  - lua module spec: [lua-module-spec.md](.agents/spec/lua-module-spec.md)
-  - claw skill spec: [claw-skill-spec.md](.agents/spec/claw-skill-spec.md)
+Five things that are not obvious and have already cost time once:
 
-## General Engineering Rules
+1. The LCD reset pin is the board `RESET` net, not a GPIO (`reset_gpio_num: -1`).
+2. There is no servo power-enable pin; GPIO 8 is on the expansion header.
+3. The console is UART0 via CH340K, not USB-Serial-JTAG.
+4. There is no touch controller.
+5. ES7210 MIC3 is an echo-cancellation reference fed from the amplifier, not a
+   microphone. Labelled `RE` in `board_devices.yaml`.
 
-- Use modular design. Each module should have clear responsibilities, ownership, and boundaries.
-- Keep source files under 1500 lines where practical; split files by responsibility when they grow beyond that.
-- Keep functions focused and reviewable; split large functions instead of adding deeply nested branches.
-- Avoid magic numbers and magic strings. Use named constants, enums, macros, Kconfig options, or shared config keys.
-- Prefer explicit ownership and explicit data flow over hidden global state.
-- Keep public headers small and avoid exposing private implementation details.
-- Avoid circular dependencies between components and modules.
-- Check return values, handle allocation failures, and clean up partially initialized resources.
-- Protect shared mutable state with documented ownership or synchronization.
+`boards/mp4_esp32_core/README.md` has the full pin table and the list of values
+that still need confirming on hardware.
 
-## Code Style
+## The plan
 
-- Implement the module in ESP-IDF using C-style object-oriented design, not C++.
-- Represent each module as an object with an opaque handle: typedef struct xxx_t *xxx_handle_t.
-- The header should expose only the handle, config, events, callbacks, and public APIs.
-- Define struct xxx_t only in the .c file to store object state and resources.
-- Use ESP-IDF-style APIs: xxx_create/delete/start/stop/read/write/set/get.
-- Use xxx_handle_t handle as the first parameter of object methods.
-- Prefer esp_err_t as the return type for public APIs.
-- Use const xxx_config_t *config as create input and xxx_handle_t *ret_handle as output.
-- Resources must be allocated in create and fully released in delete.
-- Internal resources may include memory, GPIO, I2C, SPI, timers, tasks, queues, and mutexes.
-- Protect shared state with mutexes or semaphores when accessed by multiple tasks.
-- Register callbacks with xxx_register_cb(), using handle, event, and user_ctx.
-- For polymorphism, use an xxx_ops_t function pointer table and put base struct as the first member.
-
-## Memory Allocation and Release
-
-- All runtime states must belong to a certain object instance.
-- Avoid creating local variables larger than 128 bytes on task stacks; 
-- Pre-allocated buffers, memory pools or ring buffers should be used in high-frequency scenarios.
-
-## Testing
-
-- Firmware changes should at minimum run `idf.py build` for the affected board configuration after exporting ESP-IDF and generating board manager config.
-- Component test apps live under `components/claw_modules/*/test_apps/`.
-- Lua module tests live beside modules under `components/lua_modules/<module>/test/` with descriptive names such as `json_roundtrip.lua`.
-- Embedded frontend changes should run `cd application/edge_agent/components/http_server/frontend_source && pnpm build` and `pnpm typecheck`.
-
-## Common File Locations
-
-- App entry point: `application/edge_agent/main/main.c`
-- Capability registration: `components/common/app_claw/app_capabilities.c`
-- Lua module registration: `components/common/app_claw/app_lua_modules.c`
-- App config schema/storage: `application/edge_agent/components/app_config/`
-- Board definitions: `application/edge_agent/boards/`
-
-## AGENTS.md Best-Practice Notes
-
-Use this file as a compact router, not an encyclopedia.
-
-- Keep instructions specific to this repository and this documentation workflow.
-- Prefer exact file paths and commands over broad principles.
-- Point agents to the right source files instead of duplicating long architecture explanations here.
-- Document boundaries and exceptions explicitly, especially when "do not create a page by default" is the expected behavior.
-- Update this guide when the docs workflow changes; stale agent docs are worse than missing prose.
+`.agents/mp4-integration-plan.md` is the phase-by-phase integration plan, with
+the hardware map and the reasoning behind the structure. Phases 0-2 are done.
