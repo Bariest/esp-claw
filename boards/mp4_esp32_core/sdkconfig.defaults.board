@@ -37,9 +37,17 @@ CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
 CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=y
 CONFIG_ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT=y
 
-# IMU and magnetometer Lua modules
-CONFIG_APP_CLAW_LUA_MODULE_IMU=y
-CONFIG_LUA_MODULE_IMU_CHIP_BMI270=y
+# IMU: OFF on purpose.
+#
+# ESP-Claw's lua_module_imu has a perfectly good BMI270 backend, but mpx_robot
+# also needs the IMU -- the gait loop and the skill event watcher both read it
+# at 10-20 Hz -- and two owners calling bmi270_sensor_create() on one chip is
+# not a thing that works. mpx_robot owns it, and Lua reaches it through
+# lua_module_mpx_robot instead.
+CONFIG_APP_CLAW_LUA_MODULE_IMU=n
+
+# The magnetometer is a separate chip with no second owner, so the stock
+# module is fine.
 CONFIG_APP_CLAW_LUA_MODULE_MAGNETOMETER=y
 
 # Quadruped stack
