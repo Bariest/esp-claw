@@ -1,0 +1,59 @@
+# MangDang MP4 ESP32 CORE board defaults
+# SoC: ESP32-S3-WROOM-1-N16R8 (16 MB QIO flash + 8 MB octal PSRAM)
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Flash: 16 MB, QIO 80 MHz.
+# tools/cmake/flash_partition_defaults.cmake scrapes FLASHSIZE from this file
+# and auto-selects partitions_16MB.csv, so do not set the partition table here.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Octal PSRAM, 80 MHz. The reserve/alwaysinternal pair is the working
+# configuration from HeySanta, which runs the same N16R8 module: small
+# allocations stay in internal RAM and 64 KB is held back for DMA.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_MEMTEST=n
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# Audio codecs.
+# CODEC_DUMMY_SUPPORT backs `chip: internal` on audio_dac -- the MAX98357A has
+# no control interface, so there is nothing to drive but I2S.
+CONFIG_CODEC_DUMMY_SUPPORT=y
+CONFIG_CODEC_ES7210_SUPPORT=y
+# esp_codec_dev takes an i2c_master_bus_handle_t rather than the legacy port.
+CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
+
+# Board device gates
+CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=y
+CONFIG_ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT=y
+
+# IMU and magnetometer Lua modules
+CONFIG_APP_CLAW_LUA_MODULE_IMU=y
+CONFIG_LUA_MODULE_IMU_CHIP_BMI270=y
+CONFIG_APP_CLAW_LUA_MODULE_MAGNETOMETER=y
+
+# Quadruped stack
+CONFIG_MP4_ROBOT_ENABLE=y
+CONFIG_MP4_ROBOT_SERVO_BOARD_VARIANT=1
+
+# Console is the CH340K USB-UART bridge on U0TXD/U0RXD (GPIO 43/44).
+# The native USB pins IO19/IO20 go to bare test points, so USB-Serial-JTAG --
+# which nearly every other ESP-Claw board selects -- is NOT available here.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# The PWA opens two WebSockets per browser tab and polls on top of that.
+# The app-level sdkconfig.defaults already sets CONFIG_LWIP_MAX_SOCKETS=20;
+# these two are the TIME_WAIT fixes the MPX-Dog firmware needed before its
+# socket pool would survive a reconnect storm.
+CONFIG_LWIP_TCP_MSL=5000
+CONFIG_LWIP_SO_LINGER=y

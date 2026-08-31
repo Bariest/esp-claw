@@ -1,0 +1,174 @@
+# Devices for the MangDang MP4 ESP32 CORE board.
+version: 1.0.0
+devices:
+  # ---------------------------------------------------------------- display
+  # ST7789, 240x320 native, driven 320x240 landscape.
+  #
+  # Every orientation value here is copied from the HeySanta board in
+  # xiaozhi-esp32, which drives the same panel on the same pins:
+  #   swap_xy=true, mirror_x=true, mirror_y=false, invert_color=true,
+  #   spi_mode=2, pclk=80 MHz, no offset.
+  #
+  # ST7789 is built into ESP-IDF's esp_lcd, so unlike ILI9341 or GC9A01 this
+  # device needs no `dependencies:` block -- only the factory entry in
+  # setup_device.c.
+  - name: display_lcd
+    chip: st7789
+    type: display_lcd
+    sub_type: spi
+    version: default
+    config:
+      mirror_x: true
+      mirror_y: false
+      swap_xy: true
+      invert_color: true
+      x_max: 320
+      y_max: 240
+      io_spi_config:
+        cs_gpio_num: 9                # IO9_LCD_CS
+        dc_gpio_num: 39               # IO39_LCD_DC
+        spi_mode: 2
+        pclk_hz: 80000000             # drop to 40 MHz if the panel tears
+        lcd_cmd_bits: 8
+        lcd_param_bits: 8
+        flags:
+          sio_mode: true              # no MISO on J4
+      lcd_panel_config:
+        # The panel's RST pin is wired to the board RESET net, not to a GPIO,
+        # so it can only be reset by resetting the whole board. -1 makes
+        # esp_lcd issue a software reset (0x01) over SPI instead, which is
+        # what makes this arrangement work.
+        reset_gpio_num: -1
+        bits_per_pixel: 16
+        rgb_ele_order: LCD_RGB_ELEMENT_ORDER_RGB
+        data_endian: LCD_RGB_DATA_ENDIAN_BIG
+        vendor_config: NULL
+    peripherals:
+      - name: spi_display
+
+  - name: lcd_brightness
+    type: ledc_ctrl
+    version: default
+    config:
+      default_percent: 80
+    peripherals:
+      - name: ledc_backlight
+
+  # ------------------------------------------------------------------ audio
+  # MAX98357A: a class-D amplifier that takes I2S directly. There is no
+  # control interface at all -- SD_MODE is held up by R24 (1 MOhm) which
+  # selects mono (L+R)/2, and GAIN goes only to test point TP1 through R27.
+  # So: no I2C binding, no PA-control GPIO, and `chip: internal` (the board
+  # manager's name for "raw I2S out, no codec"), which needs
+  # CONFIG_CODEC_DUMMY_SUPPORT=y.
+  #
+  # Consequence worth knowing: esp_codec_dev_set_out_vol() is a no-op on this
+  # path. Volume has to be applied in software before the samples reach I2S.
+  - name: audio_dac
+    chip: internal
+    type: audio_codec
+    version: default
+    config:
+      adc_enabled: false
+      dac_enabled: true
+      dac_max_channel: 2
+      dac_channel_mask: "11"
+      dac_init_gain: 0
+      mclk_enabled: false
+    peripherals:
+      - name: i2s_audio_out
+
+  # ES7210 4-channel audio ADC.
+  #
+  # Channel layout, from the schematic:
+  #   MIC1  <- ZTS6216 analog microphone   (TDM slot 0)
+  #   MIC2  <- ZTS6216 analog microphone   (TDM slot 1)
+  #   MIC3  <- amplifier OUTP/OUTN through the R31/R32/R35/R36 divider
+  #                                        (TDM slot 2)  <-- AEC reference
+  #   MIC4  <- unused
+  #
+  # That is exactly the esp_box_3 arrangement, so the mask and labels are
+  # the same: 'RE' is ESP-Claw's label for the reference channel, and the
+  # list reads MSB..LSB, i.e. [mic4, mic3, mic2, mic1].
+  #
+  # Nothing consumes the reference channel yet -- there is no AFE in this
+  # firmware. Declaring it now costs nothing and means adding echo
+  # cancellation later is additive rather than a board-definition change.
+  - name: audio_adc
+    chip: es7210
+    type: audio_codec
+    version: default
+    config:
+      adc_enabled: true
+      dac_enabled: false
+      adc_max_channel: 4
+      adc_channel_mask: "0111"
+      adc_channel_labels: ['NA', 'RE', 'FR', 'FL']
+      adc_init_gain: 30
+      mclk_enabled: true
+    peripherals:
+      - name: i2s_audio_in
+      - name: i2c_master
+        # 8-bit write address. The schematic annotates ES7210_I2C_ADD: 0x41,
+        # which is the 7-bit form, and HeySanta ships 0x82 for the same part.
+        # But R26/R28 strap AD0/AD1 ambiguously in the PDF and every ES7210
+        # board in ESP-Claw uses 0x80 (7-bit 0x40), so an I2C scan on bus 0
+        # is the thing that settles this. Candidates: 0x80 0x82 0x84 0x86.
+        address: 0x82
+        frequency: 400000
+
+  # ------------------------------------------------------------------- imu
+  # BMI270 accelerometer + gyroscope on the shared I2C bus, INT1 on GPIO 10.
+  #
+  # init_skip: the BMI270 uploads an ~8 KB configuration blob during create,
+  # so keep that off the boot path and let lua_module_imu bring it up lazily.
+  #
+  # The field order below must match lua_imu_board_cfg_t in
+  # lua_module_imu.c exactly -- the generator emits struct fields in YAML
+  # order and silently omits absent keys, and the module checks cfg_size.
+  # Use -1 for unused pins rather than dropping the key.
+  - name: imu_sensor
+    chip: bmi270
+    type: custom
+    version: 1.0.0
+    init_skip: true
+    config:
+      i2c_addr: 0x68
+      frequency: 400000
+      int_gpio_num: 10
+      sdo_gpio_num: -1
+    peripherals:
+      - name: i2c_master
+
+  # BMM150 magnetometer, same bus. No interrupt line is routed.
+  - name: magnetometer_sensor
+    chip: bmm150
+    type: custom
+    version: 1.0.0
+    init_skip: true
+    config:
+      i2c_addr: 0x10
+      frequency: 400000
+      int_gpio_num: -1
+      sdo_gpio_num: -1
+    peripherals:
+      - name: i2c_master
+
+  # --------------------------------------------------------------- buttons
+  # Two momentary buttons to ground: BOOT (SW2, also strapping) and WAKE (SW3).
+  #
+  # Nothing in ESP-Claw reads this device's config -- `gpio_button` is purely
+  # descriptive, and it varies field-for-field between boards. What it does do
+  # is land in the generated board metadata, which becomes the
+  # board_hardware_info skill the agent reads at runtime. So it is here to
+  # tell the model which buttons exist. lua_module_button takes explicit
+  # GPIO numbers from Lua and does not consult this.
+  - name: board_buttons
+    chip: gpio_button
+    type: custom
+    version: 1.0.0
+    init_skip: true
+    config:
+      boot_gpio_num: 0
+      wake_gpio_num: 21
+      active_level: 0
