@@ -56,6 +56,16 @@ There is no way to blank the panel from here, and that is deliberate: a dark
 screen on a robot reads as a crash. Use `display_set_brightness` with 0 if
 someone actually wants the light off.
 
+## When these four tools are not enough
+
+You can also write a Lua script that draws anything LVGL can render -- a
+timer, a chart, a scene, an expression nobody defined. See the
+`mpx_display_draw` skill for how, and for the rule that catches everyone:
+a drawing only lives as long as its script does.
+
+Reach for it when the request carries information or detail. For a plain
+change of mood, `display_show_emotion` is faster, animated, and better.
+
 The screen is shared, not owned: a running robot skill can draw over anything
 you put there, and that is correct — the skill is the thing the user is
 watching at that moment. If a face does not appear, a skill probably has the
