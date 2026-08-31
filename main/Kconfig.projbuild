@@ -1,0 +1,116 @@
+menu "App Config"
+
+menu "Default Wi-Fi Settings"
+
+    config APP_WIFI_SSID
+        string "Default Wi-Fi SSID"
+        default ""
+        help
+            Default Wi-Fi SSID used to populate app settings.
+
+    config APP_WIFI_PASSWORD
+        string "Default Wi-Fi password"
+        default ""
+        help
+            Default Wi-Fi password used to populate app settings.
+
+    config APP_WIFI_AP_SSID_PREFIX
+        string "Provisioning AP SSID prefix"
+        default "esp-claw"
+        help
+            Prefix used to build the unique provisioning AP SSID. The full
+            SSID is "<prefix>-<MAC[3..5]>" (e.g. esp-claw-84AEE5).
+
+    config APP_WIFI_AP_CHANNEL
+        int "Provisioning AP channel"
+        range 1 13
+        default 1
+        help
+            Channel used by the provisioning SoftAP.
+
+    config APP_WIFI_AP_MAX_CONN
+        int "Provisioning AP max connections"
+        range 1 10
+        default 4
+        help
+            Maximum number of concurrent stations on the provisioning AP.
+
+    config APP_WIFI_MAX_RETRY
+        int "STA max retries before AP fallback"
+        range 1 20
+        default 5
+        help
+            After this many consecutive STA connection failures the device
+            falls back to pure AP mode and waits for the user to provision
+            new credentials.
+
+endmenu
+
+menu "Default Search Settings"
+
+    config APP_SEARCH_HTTP_ALLOWLIST
+        string "Default HTTP Request allowlist"
+        default "*"
+        help
+            Default value used to populate app setting `search_http_allowlist`.
+            Use `*` to allow all hosts, or a comma-separated list of domains/IPs.
+
+            e.g. "api.example.com,*.example.org,203.0.113.10"
+
+endmenu
+
+
+menu "MP4 Robot"
+
+    config MP4_ROBOT_ENABLE
+        bool "MP4 quadruped robot support"
+        depends on APP_CLAW_CAP_LUA
+        depends on APP_CLAW_CAP_SKILL_MGR
+        default n
+        help
+            Enable the MangDang quadruped robot stack for the MP4 ESP32 CORE
+            board: the AT32F413 servo driver boards over SPI, the Stanford
+            gait generator and inverse kinematics, the WASM skill runtime,
+            and the /v1 API the MPX-Dog PWA speaks.
+
+            Board defaults turn this on; it is off by default so that stock
+            ESP-Claw boards still build from this tree.
+
+    config MP4_ROBOT_SERVO_BOARD_VARIANT
+        int "Servo driver board wiring variant"
+        depends on MP4_ROBOT_ENABLE
+        range 1 5
+        default 1
+        help
+            Which physical servo wiring this robot was built with. The AT32
+            driver boards are interchangeable but the legs are not always
+            plugged in the same order, so a logical servo id maps to a
+            different physical channel per build. See db_phys() in
+            components/mpx_robot/src/driver_board.h.
+
+            1 = normal (black board)
+            2 = hip/calf swapped within each leg
+            3 = purple board (leg groups swapped straight across)
+            4 = white pupper, ports 3/12/9/8/6 broken
+            5 = white pupper, ports 4/5/6/8 broken
+
+    config MP4_ROBOT_UUID
+        string "Robot UUID"
+        depends on MP4_ROBOT_ENABLE
+        default "MPX-DOG-01"
+        help
+            Identifies this robot to the skill marketplace gateway, and is
+            the AAD for the MPXE encrypted-skill key unwrap. Changing it
+            makes every already-purchased skill fail to decrypt.
+
+    config MP4_SKILL_AES_KEY_HEX
+        string "MPXE skill decryption key (64 hex chars)"
+        depends on MP4_ROBOT_ENABLE
+        default "0000000000000000000000000000000000000000000000000000000000000001"
+        help
+            AES-256 root key used to unwrap the per-skill key inside an .mpxe
+            module. The default is INSECURE and is refused in release builds.
+
+endmenu
+
+endmenu

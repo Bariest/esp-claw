@@ -1,3 +1,0 @@
-dependencies:
-  cap_lua:
-    path: ../../../../components/claw_capabilities/cap_lua
