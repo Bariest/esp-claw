@@ -53,6 +53,7 @@ static const char *TAG = "http_mpx_lua";
 #define MPX_LUA_RUN_TIMEOUT_MS  5000
 #define MPX_LUA_OUTPUT_MAX      2048
 #define MPX_LUA_SCRIPT_MAX      (32 * 1024)
+#define MPX_LUA_BODY_MAX        (64 * 1024)
 #define MPX_LUA_QUEUE_DEPTH     8
 #define MPX_LUA_DEPLOY_SLOTS    8   /* _deploy_0..7.lua, reused round-robin */
 
@@ -117,6 +118,42 @@ static bool lua_write_file(const char *full_path, const char *data, size_t len)
         return false;
     }
     return true;
+}
+
+/* ── Body reader ───────────────────────────────────────────────────────────
+ *
+ * Not http_server_parse_json_body(): that caps a body at 8 KB, which is right
+ * for a settings form and wrong here. A marketplace skill's deploy script is
+ * the body of a /v1/lua/enqueue POST, and one of those can be tens of
+ * kilobytes -- the old firmware allowed 256 KB. Truncating it would hand cJSON
+ * a half-object and report "invalid JSON" for a request that was fine.
+ */
+static esp_err_t lua_parse_body(httpd_req_t *req, cJSON **out_root)
+{
+    char *buf;
+    int total = 0;
+
+    *out_root = NULL;
+    if (req->content_len <= 0 || req->content_len > MPX_LUA_BODY_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    buf = malloc(req->content_len + 1);
+    if (!buf) {
+        return ESP_ERR_NO_MEM;
+    }
+    while (total < (int)req->content_len) {
+        int got = httpd_req_recv(req, buf + total, req->content_len - total);
+        if (got <= 0) {
+            free(buf);
+            return ESP_FAIL;
+        }
+        total += got;
+    }
+    buf[total] = '\0';
+
+    *out_root = cJSON_Parse(buf);
+    free(buf);
+    return *out_root ? ESP_OK : ESP_ERR_INVALID_ARG;
 }
 
 /* ── Responses ─────────────────────────────────────────────────────────── */
@@ -225,7 +262,7 @@ static esp_err_t lua_enqueue_handler(httpd_req_t *req)
     lua_queue_item_t item;
     char name[32];
 
-    if (http_server_parse_json_body(req, &body) != ESP_OK || !body) {
+    if (lua_parse_body(req, &body) != ESP_OK || !body) {
         return lua_send_err(req, "invalid JSON body");
     }
     script = cJSON_GetObjectItem(body, "script");
@@ -281,7 +318,7 @@ static esp_err_t lua_run_handler(httpd_req_t *req)
     esp_err_t err;
     cJSON *resp;
 
-    if (http_server_parse_json_body(req, &body) != ESP_OK || !body) {
+    if (lua_parse_body(req, &body) != ESP_OK || !body) {
         return lua_send_err(req, "invalid JSON body");
     }
     script = cJSON_GetObjectItem(body, "script");
@@ -387,7 +424,7 @@ static esp_err_t lua_save_handler(httpd_req_t *req)
     char full[HTTP_SERVER_PATH_MAX];
     const char *text;
 
-    if (http_server_parse_json_body(req, &body) != ESP_OK || !body) {
+    if (lua_parse_body(req, &body) != ESP_OK || !body) {
         return lua_send_err(req, "invalid JSON body");
     }
     name = cJSON_GetObjectItem(body, "name");
@@ -478,7 +515,7 @@ static esp_err_t lua_delete_handler(httpd_req_t *req)
     char full[HTTP_SERVER_PATH_MAX];
     bool ok;
 
-    if (http_server_parse_json_body(req, &body) != ESP_OK || !body) {
+    if (lua_parse_body(req, &body) != ESP_OK || !body) {
         return lua_send_err(req, "invalid JSON body");
     }
     name = cJSON_GetObjectItem(body, "name");
