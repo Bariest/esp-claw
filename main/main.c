@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "esp_netif.h"
 #include "wifi_manager.h"
 #include "time.h"
 #include "nvs_flash.h"
@@ -197,7 +198,12 @@ static esp_err_t main_get_wifi_status(http_server_wifi_status_t *status)
     status->ip = wifi_status.sta_ip;
     status->ap_active = wifi_status.ap_active;
     status->ap_ssid = wifi_status.ap_ssid;
-    status->ap_ip = wifi_status.ap_ip;
+    /* Not wifi_status.ap_ip: wifi_manager snapshots that string when the AP
+     * comes up and never refreshes it, so it still holds the address the
+     * interface had before main_apply_ap_ip() renumbered it. Everything that
+     * tells a user where to point -- /v1/wifi/status, the captive portal
+     * redirect -- reads it through here, so this is the one place to correct. */
+    status->ap_ip = wifi_status.ap_active ? MP4_AP_IP_ADDR : wifi_status.ap_ip;
     status->wifi_mode = wifi_status.mode;
     status->sta_configured = wifi_status.sta_configured;
     /* The SSID comes from the saved config rather than the radio, which does
@@ -220,6 +226,40 @@ static esp_err_t main_restart_device(void)
 {
     BaseType_t ok = xTaskCreate(main_restart_task, "http_restart", 2048, NULL, 5, NULL);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "Failed to create restart task");
+    return ESP_OK;
+}
+
+/* ── The robot's own access point ──────────────────────────────────────────
+ *
+ * ESP-Claw's wifi_manager leaves the AP on the ESP-IDF default, 192.168.4.1.
+ * The MPX toolchain does not: mpx-cli defaults to 192.168.2.1, its
+ * connection-failure hint names that address, and so does every note anyone
+ * has written down about these robots. Moving the firmware is a dozen lines;
+ * moving the toolchain means a per-machine .env on every clone forever, and a
+ * built-in error hint that confidently tells you the wrong address.
+ */
+#define MP4_AP_IP_ADDR "192.168.2.1"
+
+static esp_err_t main_apply_ap_ip(void)
+{
+    esp_netif_t *ap = wifi_manager_get_ap_netif();
+    esp_netif_ip_info_t ip = {0};
+
+    ESP_RETURN_ON_FALSE(ap, ESP_ERR_INVALID_STATE, TAG, "no AP netif");
+
+    ip.ip.addr      = esp_ip4addr_aton(MP4_AP_IP_ADDR);
+    ip.gw.addr      = ip.ip.addr;
+    ip.netmask.addr = esp_ip4addr_aton("255.255.255.0");
+
+    /* The DHCP server has to be down to renumber the interface, and it hands
+     * out the gateway from this same ip_info once it is back up. Do this
+     * before captive_dns_start(), which writes the DNS option into the very
+     * DHCP configuration a restart here would otherwise discard. */
+    ESP_RETURN_ON_ERROR(esp_netif_dhcps_stop(ap), TAG, "AP dhcps stop failed");
+    ESP_RETURN_ON_ERROR(esp_netif_set_ip_info(ap, &ip), TAG, "AP set ip failed");
+    ESP_RETURN_ON_ERROR(esp_netif_dhcps_start(ap), TAG, "AP dhcps start failed");
+
+    ESP_LOGI(TAG, "AP address set to %s", MP4_AP_IP_ADDR);
     return ESP_OK;
 }
 
@@ -582,6 +622,11 @@ void app_main(void)
     if (wifi_err != ESP_OK) {
         ESP_LOGE(TAG, "Wi-Fi start failed: %s", esp_err_to_name(wifi_err));
     } else {
+        esp_err_t ap_ip_err = main_apply_ap_ip();
+        if (ap_ip_err != ESP_OK) {
+            ESP_LOGW(TAG, "Could not move the AP to %s: %s -- mpx-cli will need "
+                          "MPX_HOST set", MP4_AP_IP_ADDR, esp_err_to_name(ap_ip_err));
+        }
         ESP_ERROR_CHECK(http_server_start());
         if (captive_dns_start(&(captive_dns_config_t) {
                 .ap_netif = wifi_manager_get_ap_netif(),
