@@ -83,6 +83,10 @@ esp_err_t http_server_register_mpx_studio_routes(httpd_handle_t server);
 esp_err_t http_server_register_mpx_wifi_routes(httpd_handle_t server);
 esp_err_t http_server_register_mpx_market_routes(httpd_handle_t server);
 esp_err_t http_server_register_mpx_chat_routes(httpd_handle_t server);
+/* Serves the PWA and the settings UI from the system partition, and owns
+ * "/" in place of http_server_register_assets_routes(). Register it LAST:
+ * its catch-all matches every GET. */
+esp_err_t http_server_register_mpx_web_routes(httpd_handle_t server);
 void http_server_mpx_chat_ws_fd_remove(int fd);
 /* Mirror of every outbound "web" message into the PWA chat socket.
  * cap_im_local has one outbound callback slot and webim owns it, so the

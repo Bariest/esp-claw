@@ -117,7 +117,9 @@ esp_err_t http_server_start(void)
     config.uri_match_fn = httpd_uri_match_wildcard;
 
     ESP_RETURN_ON_ERROR(httpd_start(&s_ctx.server, &config), TAG, "Failed to start HTTP server");
+#if !CONFIG_MP4_ROBOT_ENABLE
     ESP_RETURN_ON_ERROR(http_server_register_assets_routes(s_ctx.server), TAG, "Failed to register assets routes");
+#endif
     ESP_RETURN_ON_ERROR(http_server_register_capabilities_routes(s_ctx.server), TAG, "Failed to register capability routes");
     ESP_RETURN_ON_ERROR(http_server_register_lua_modules_routes(s_ctx.server), TAG, "Failed to register Lua module routes");
     ESP_RETURN_ON_ERROR(http_server_register_config_routes(s_ctx.server), TAG, "Failed to register config routes");
@@ -138,6 +140,9 @@ esp_err_t http_server_start(void)
     ESP_RETURN_ON_ERROR(http_server_register_mpx_wifi_routes(s_ctx.server), TAG, "Failed to register wifi routes");
     ESP_RETURN_ON_ERROR(http_server_register_mpx_market_routes(s_ctx.server), TAG, "Failed to register marketplace routes");
     ESP_RETURN_ON_ERROR(http_server_register_mpx_chat_routes(s_ctx.server), TAG, "Failed to register chat routes");
+    /* Last: its "/*" matches everything, and httpd hands a request to the
+     * first entry that matches in registration order. */
+    ESP_RETURN_ON_ERROR(http_server_register_mpx_web_routes(s_ctx.server), TAG, "Failed to register web routes");
 #if CONFIG_APP_CLAW_CAP_LUA
     ESP_RETURN_ON_ERROR(http_server_register_mpx_lua_routes(s_ctx.server), TAG, "Failed to register lua routes");
 #endif

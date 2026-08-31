@@ -52,6 +52,44 @@ add_custom_target(edge_agent_prepare_fatfs_image ALL
     VERBATIM
 )
 
+# ── Web bundles -> the system partition ───────────────────────────────────
+#
+# Both UIs are streamed off the read-only system partition rather than embedded
+# in the app image with EMBED_FILES. The PWA's bundle is ~126 KB gzipped and
+# ESP-Claw's SolidJS one ~73 KB; as .rodata that is 199 KB of a 5 MB app slot
+# spent on files that never execute -- and paid twice, because ota_1 is the
+# same size. On the system partition (2600 KB, roughly half of it free) they
+# cost the app image nothing, and a UI change reflashes in seconds without
+# rebuilding firmware.
+#
+# Staged into the build-side staging tree, not into fatfs_image/ itself, so a
+# build never writes into the source tree.
+set(EDGE_AGENT_WEB_ASSET_COPY_COMMANDS "")
+set(EDGE_AGENT_PWA_WWW_DIR "${CMAKE_SOURCE_DIR}/components/http_server/frontend_pwa/www")
+set(EDGE_AGENT_SETTINGS_HTML_GZ
+    "${CMAKE_SOURCE_DIR}/components/http_server/frontend_source/dist/index.html.gz")
+
+if(EXISTS "${EDGE_AGENT_PWA_WWW_DIR}")
+    list(APPEND EDGE_AGENT_WEB_ASSET_COPY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${EDGE_AGENT_PWA_WWW_DIR}"
+                "${EDGE_AGENT_FATFS_SYSTEM_BUILD_ROOT}/www"
+    )
+else()
+    message(WARNING
+        "PWA bundle not found at ${EDGE_AGENT_PWA_WWW_DIR}\n"
+        "The robot will boot and serve /v1, but the web UI will be missing.\n"
+        "Build it with:  cd components/http_server/frontend_pwa && npm ci && npm run build")
+endif()
+
+if(EXISTS "${EDGE_AGENT_SETTINGS_HTML_GZ}")
+    list(APPEND EDGE_AGENT_WEB_ASSET_COPY_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${EDGE_AGENT_SETTINGS_HTML_GZ}"
+                "${EDGE_AGENT_FATFS_SYSTEM_BUILD_ROOT}/settings/index.html.gz"
+    )
+endif()
+
 # Prepare the read-only system partition build tree: mirror the source
 # system_fs_image/ into a build-side staging dir that skill/lua syncs
 # can also write into before fatfsgen packs it.
@@ -62,6 +100,7 @@ add_custom_target(edge_agent_prepare_system_fs_image ALL
             "${EDGE_AGENT_FATFS_SYSTEM_SOURCE_ROOT}"
             "${EDGE_AGENT_FATFS_SYSTEM_BUILD_ROOT}"
     ${EDGE_AGENT_BOARD_FATFS_SYSTEM_COPY_COMMANDS}
+    ${EDGE_AGENT_WEB_ASSET_COPY_COMMANDS}
     VERBATIM
 )
 

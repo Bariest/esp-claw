@@ -26,6 +26,11 @@ set(http_server_srcs
     "http_server_utils.c"
 )
 
+set(http_server_embed_files
+    "${FRONTEND_DIST_HTML_GZ}"
+    "${FRONTEND_PUBLIC_FAVICON_ICO}"
+)
+
 set(http_server_requires
     app_config
     app_claw
@@ -46,6 +51,15 @@ if(CONFIG_MP4_ROBOT_ENABLE)
         "http_server_mpx_market_api.c"
         "http_server_mpx_chat_api.c")
     list(APPEND http_server_requires mpx_robot mpx_wasm mpx_util fatfs esp_http_client)
+
+    # Both web bundles move to the read-only system partition: the app image
+    # keeps neither, and gains room instead of losing 199 KB of .rodata to
+    # files that never execute. http_server_mpx_web.c streams them from there
+    # and takes over "/" from http_server_assets.c, which is why that file is
+    # dropped rather than sitting alongside registering a competing route.
+    list(REMOVE_ITEM http_server_srcs "http_server_assets.c")
+    list(APPEND http_server_srcs "http_server_mpx_web.c")
+    set(http_server_embed_files "${FRONTEND_PUBLIC_FAVICON_ICO}")
     if(CONFIG_APP_CLAW_CAP_LUA)
         # The PWA's /v1/lua store, backed by ESP-Claw's Lua runtime.
         list(APPEND http_server_srcs "http_server_mpx_lua_api.c")
@@ -64,8 +78,7 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
     EMBED_FILES
-        "${FRONTEND_DIST_HTML_GZ}"
-        "${FRONTEND_PUBLIC_FAVICON_ICO}"
+        ${http_server_embed_files}
     REQUIRES
         ${http_server_requires}
 )

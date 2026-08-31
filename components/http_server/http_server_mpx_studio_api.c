@@ -423,6 +423,12 @@ esp_err_t http_server_register_mpx_studio_routes(httpd_handle_t server)
 {
     const httpd_uri_t handlers[] = {
         { .uri = "/v1/studio/mode",    .method = HTTP_GET, .handler = studio_mode_handler },
+        /* The same URL again for POST. ServoStudio leaves studio mode with
+         * navigator.sendBeacon(), which is the one way a page can still be
+         * heard from as it unloads -- and sendBeacon always POSTs. Without
+         * this entry that beacon 405s and the robot is left with its servos
+         * in studio mode after the tab closes. */
+        { .uri = "/v1/studio/mode",    .method = HTTP_POST, .handler = studio_mode_handler },
         { .uri = "/v1/studio/status",  .method = HTTP_GET, .handler = studio_status_handler },
         { .uri = "/v1/studio/temps",   .method = HTTP_GET, .handler = studio_temps_handler },
         { .uri = "/v1/studio/scan",    .method = HTTP_GET, .handler = studio_scan_handler },

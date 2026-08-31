@@ -20,6 +20,12 @@ node_modules/
 components/http_server/frontend_source/dist/*
 !components/http_server/frontend_source/dist/index.html.gz
 components/http_server/frontend_pwa/node_modules/
+# The PWA build writes both plain and gzipped variants into www/. Only the
+# .gz are flashed onto the system partition, and those are committed so a
+# fresh clone builds firmware without needing node installed.
+components/http_server/frontend_pwa/www/*
+!components/http_server/frontend_pwa/www/*.gz
+components/http_server/frontend_pwa/.vite/
 
 # IDE / Editor
 .vscode/
