@@ -44,6 +44,11 @@
 
 #define APP_ENABLE_MEM_LOG        (0)
 
+/* The robot's own access point. Declared up here rather than beside
+ * main_apply_ap_ip() because main_get_wifi_status(), which reports this
+ * address, is defined earlier in the file. */
+#define MP4_AP_IP_ADDR            "192.168.2.1"
+
 static const char *TAG = "app";
 
 static app_config_t *s_config;
@@ -238,8 +243,6 @@ static esp_err_t main_restart_device(void)
  * moving the toolchain means a per-machine .env on every clone forever, and a
  * built-in error hint that confidently tells you the wrong address.
  */
-#define MP4_AP_IP_ADDR "192.168.2.1"
-
 static esp_err_t main_apply_ap_ip(void)
 {
     esp_netif_t *ap = wifi_manager_get_ap_netif();
