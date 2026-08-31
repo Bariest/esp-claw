@@ -32,6 +32,12 @@
 #if CONFIG_MP4_ROBOT_ENABLE
 #include "mpx_robot.h"
 #include "mpx_wasm.h"
+#include "app_capabilities.h"
+#include "cap_robot.h"
+#include "cap_mpx_skill.h"
+#if CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
+#include "cap_display.h"
+#endif
 #endif
 
 #define APP_ENABLE_MEM_LOG        (0)
@@ -317,6 +323,82 @@ static void memory_monitor_task(void *arg)
 
 #endif
 
+
+#if CONFIG_MP4_ROBOT_ENABLE
+/* ── Robot capability groups ──────────────────────────────────────────────
+ *
+ * ESP-Claw takes application-provided capability groups through a registry
+ * that app_capabilities_init() merges with its own compiled table, so none of
+ * this requires editing anything inside the submodule. Registration has to
+ * happen BEFORE app_claw_start(), which is where that merge runs.
+ *
+ * The register_fn signature carries the config and storage paths because some
+ * built-in groups need them (cap_lua wants the script root, the IM groups want
+ * credentials). These three do not: everything they touch is already
+ * initialised by the time app_claw_start() is reached. */
+static esp_err_t app_register_cap_robot(const app_claw_config_t *config,
+                                        const app_claw_storage_paths_t *paths)
+{
+    (void)config;
+    (void)paths;
+    return cap_robot_register_group();
+}
+
+static esp_err_t app_register_cap_mpx_skill(const app_claw_config_t *config,
+                                            const app_claw_storage_paths_t *paths)
+{
+    (void)config;
+    (void)paths;
+    return cap_mpx_skill_register_group();
+}
+
+#if CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
+static esp_err_t app_register_cap_display(const app_claw_config_t *config,
+                                          const app_claw_storage_paths_t *paths)
+{
+    (void)config;
+    (void)paths;
+    return cap_display_register_group();
+}
+#endif
+
+static void app_register_robot_capabilities(void)
+{
+    static const app_capability_external_group_t groups[] = {
+        {
+            .group_id = "cap_robot",
+            .display_name = "Robot",
+            .llm_visible_by_default = true,
+            .reg = app_register_cap_robot,
+        },
+        {
+            .group_id = "cap_mpx_skill",
+            .display_name = "Robot skills",
+            .llm_visible_by_default = true,
+            .reg = app_register_cap_mpx_skill,
+        },
+#if CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
+        {
+            .group_id = "cap_display",
+            .display_name = "Robot display",
+            .llm_visible_by_default = true,
+            .reg = app_register_cap_display,
+        },
+#endif
+    };
+
+    for (size_t i = 0; i < sizeof(groups) / sizeof(groups[0]); i++) {
+        const esp_err_t err = app_capabilities_register_external_group(&groups[i]);
+        if (err != ESP_OK) {
+            /* Not fatal. A device that cannot walk is still worth booting into
+             * the web UI so it can be told why. */
+            ESP_LOGE(TAG, "Could not register %s: %s",
+                     groups[i].group_id, esp_err_to_name(err));
+        }
+    }
+}
+#endif  /* CONFIG_MP4_ROBOT_ENABLE */
+
 void app_main(void)
 {
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
@@ -442,6 +524,12 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(app_claw_set_save_config_callback(main_save_claw_config, NULL));
+#if CONFIG_MP4_ROBOT_ENABLE
+    /* Must precede app_claw_start(): that is where the external groups are
+     * merged with the built-in table and the LLM-visible set is computed. */
+    app_register_robot_capabilities();
+#endif
+
     ESP_ERROR_CHECK(app_claw_start(s_claw_config));
 #if CONFIG_APP_CLAW_CAP_IM_LOCAL
     ESP_ERROR_CHECK(http_server_webim_bind_im());

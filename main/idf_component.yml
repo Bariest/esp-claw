@@ -70,3 +70,23 @@ dependencies:
     rules:
     - if: $CONFIG{MP4_ROBOT_ENABLE} == True
     path: ../components/mpx_wasm
+
+  # ---- Robot capability groups ------------------------------------------
+  # Registered from app_main through app_capabilities_register_external_group(),
+  # which is the one extension point a downstream ESP-Claw product actually
+  # needs. Nothing in app_claw is edited.
+  cap_robot:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/cap_robot
+
+  cap_mpx_skill:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/cap_mpx_skill
+
+  cap_display:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    - if: $CONFIG{ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT} == True
+    path: ../components/cap_display
