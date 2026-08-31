@@ -161,10 +161,27 @@ esp_err_t cap_display_face_start(void)
         return ESP_ERR_TIMEOUT;
     }
     err = show_face_locked();
+
+    /* Also make the face the display service's default screen -- what the
+     * panel falls back to when no session owns it.
+     *
+     * This is what happens after a Lua drawing finishes. The agent can write
+     * Lua that takes the display (lua_module_lvgl for objects,
+     * lua_module_display for the raw framebuffer) and draws whatever it
+     * invents; when that script calls display.deinit() the session is
+     * released, and without this line the panel would fall back to
+     * system_ui's launcher home -- a screen this board has no touch
+     * controller to operate. With it, the robot always returns to its face. */
+    if (err == ESP_OK) {
+        lv_obj_t *face = cap_display_face_screen_locked();
+        if (face) {
+            display_service_set_default_screen_locked(face);
+        }
+    }
     display_service_unlock();
 
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "face is up");
+        ESP_LOGI(TAG, "face is up, and is the fallback screen");
     }
     return err;
 }
