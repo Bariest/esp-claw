@@ -4,13 +4,14 @@
   "description": "Drive the MangDang quadruped: walk, turn, hold a pose, and read gait, IMU and servo state.",
   "author": "MangDang",
   "metadata": {
-    "category": ["utility"],
-    "tags": ["robot", "quadruped", "walk", "gait", "servo", "imu"],
-    "cap_groups": ["cap_robot"],
+    "cap_groups": [
+      "cap_robot"
+    ],
     "manage_mode": "readonly"
   }
 }
 ---
+
 
 # MangDang quadruped
 

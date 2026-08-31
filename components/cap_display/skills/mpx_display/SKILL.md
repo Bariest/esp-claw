@@ -4,14 +4,14 @@
   "description": "Show text and faces on the robot's screen, and control its backlight.",
   "author": "MangDang",
   "metadata": {
-    "category": ["utility"],
-    "tags": ["display", "screen", "face", "emotion", "backlight"],
-    "peripherals": ["display"],
-    "cap_groups": ["cap_display"],
+    "cap_groups": [
+      "cap_display"
+    ],
     "manage_mode": "readonly"
   }
 }
 ---
+
 
 # The robot's screen
 
