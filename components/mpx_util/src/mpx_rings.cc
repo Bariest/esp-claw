@@ -37,7 +37,7 @@ void mpx_log_ring_init(void)
 char *mpx_log_ring_json_alloc(uint32_t since, size_t max_lines, uint32_t *out_next)
 {
     uint32_t next = since;
-    const std::string json = util::log_ring_json(since, max_lines, &next);
+    const std::string json = util::log_ring_json(since, max_lines, next);
     if (out_next != nullptr) {
         *out_next = next;
     }
@@ -47,7 +47,7 @@ char *mpx_log_ring_json_alloc(uint32_t since, size_t max_lines, uint32_t *out_ne
 char *mpx_trace_ring_json_alloc(uint32_t since, size_t max_samples, uint32_t *out_next)
 {
     uint32_t next = since;
-    const std::string json = util::trace_ring_json(since, max_samples, &next);
+    const std::string json = util::trace_ring_json(since, max_samples, next);
     if (out_next != nullptr) {
         *out_next = next;
     }
