@@ -38,6 +38,21 @@ extern "C" {
 #include "i2c_bus.h"
 }
 
+/* The board manager generates this table as C, and only declares it in a
+ * private header (private_inc/esp_board_find_utils.h) that components outside
+ * it cannot include. So declare it here.
+ *
+ * The extern "C" is load-bearing: without it the C++ compiler mangles the name
+ * and the failure lands at link time rather than compile time. It also has to
+ * sit at namespace scope -- a linkage specification inside a function body is
+ * not legal C++, which is what the first attempt got wrong.
+ *
+ * Walking the table rather than calling esp_board_manager_get_device_config()
+ * is deliberate: the walk yields cfg_size, and that is the only thing standing
+ * between a YAML/struct mismatch and an IMU that silently returns nonsense.
+ * ESP-Claw's own lua_module_imu.c does the same for the same reason. */
+extern "C" const esp_board_device_desc_t g_esp_board_devices[];
+
 static const char *TAG = "mpx_imu";
 
 namespace robot {
@@ -86,11 +101,6 @@ bool             s_ready         = false;
 
 esp_err_t resolve_board_cfg(const mpx_imu_board_cfg_t **out)
 {
-    /* The generated board table is C. Without the extern "C" the C++ compiler
-     * mangles the name and this fails at link, not at compile -- which is a
-     * much worse place to find out. ESP-Claw's own consumer of this symbol
-     * (lua_module_imu.c) is a C file and so does not need the wrapper. */
-    extern "C" const esp_board_device_desc_t g_esp_board_devices[];
     const esp_board_device_desc_t *desc = g_esp_board_devices;
 
     while (desc != nullptr && desc->name != nullptr) {
@@ -145,14 +155,14 @@ esp_err_t open_i2c_bus(const char *peripheral_name, int frequency)
         .mode = I2C_MODE_MASTER,
         .sda_io_num = master_cfg->sda_io_num,
         .scl_io_num = master_cfg->scl_io_num,
-        .sda_pullup_en = master_cfg->flags.enable_internal_pullup,
-        .scl_pullup_en = master_cfg->flags.enable_internal_pullup,
+        .sda_pullup_en = master_cfg->flags.enable_internal_pullup != 0,
+        .scl_pullup_en = master_cfg->flags.enable_internal_pullup != 0,
         .master = { .clk_speed = (uint32_t)frequency },
         .clk_flags = 0,
     };
     (void)master_handle;
 
-    s_i2c_bus = i2c_bus_create(master_cfg->i2c_port, &bus_cfg);
+    s_i2c_bus = i2c_bus_create((i2c_port_t)master_cfg->i2c_port, &bus_cfg);
     if (s_i2c_bus == nullptr) {
         ESP_LOGE(TAG, "i2c_bus_create failed on port %d", (int)master_cfg->i2c_port);
         return ESP_FAIL;
