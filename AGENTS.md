@@ -52,6 +52,19 @@ nothing tells you.
 
 The console is the CH340K on UART0, not USB-Serial-JTAG.
 
+### On Windows, set PYTHONIOENCODING first
+
+```powershell
+$env:PYTHONIOENCODING = "utf-8"    # or set it permanently for your user
+```
+
+esp-sr's `model/movemodel.py` prints a box-drawing character in its model
+report. With the default cp1252 console codec that raises
+`UnicodeEncodeError` and the build fails at "Move and Pack models" -- before
+it reaches any of our code, and with an error that looks nothing like the
+cause. It is a bug in esp-sr, still present on their master, so bumping the
+version does not help.
+
 ## How ESP-Claw components enter the build
 
 Through IDF Component Manager `path:` dependencies in `main/idf_component.yml`,
