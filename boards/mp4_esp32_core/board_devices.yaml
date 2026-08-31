@@ -133,15 +133,17 @@ devices:
     version: 1.0.0
     init_skip: true
     config:
-      # SDO is strapped to VDDIO through R50 (2.2k), so the chip answers on
-      # the secondary address. The schematic spells this out next to U15:
-      # "SDO=GND 0x68, SDO=VDDIO 0x69". M5's CoreS3, which wires the same
-      # BMI270 + BMM150 pair the same way, likewise uses BMI2_I2C_SEC_ADDR.
+      # U11 pin 1 (SDO) is pulled to 3V3 through R48 (10k), so the chip answers
+      # on the secondary address. Verified on MP4ESP32_CORE_SCH_0827 sheet 2.
+      # M5's CoreS3 wires the same BMI270 + BMM150 pair the same way and its
+      # driver likewise uses BMI2_I2C_SEC_ADDR.
       i2c_addr: 0x69
       frequency: 400000
-      # INT1 (pin 4) and INT2 (pin 9) are both left unconnected on this board,
-      # so there is no data-ready line to wait on -- mpx_imu polls instead.
-      int_gpio_num: -1
+      # INT1 (pin 4) goes to GPIO10 as net IO10_INT1. INT2 (pin 9) is the one
+      # left unconnected, along with OCSB and OSDO. mpx_imu polls at 20 Hz and
+      # does not use the line, but it is declared so nothing else claims the
+      # pin.
+      int_gpio_num: 10
       sdo_gpio_num: -1
     peripherals:
       - name: i2c_master
@@ -153,6 +155,9 @@ devices:
   # accelerometer's own auxiliary master. Nothing on i2c_master can address
   # it, so a device entry here would hand out a handle that can never reach
   # the chip.
+  #
+  # U4's own straps confirm that reading: SDO to GND (so 0x10), PS to 3V3
+  # (I2C mode), CSB to GND, and both INT and DRY unconnected.
   #
   # To use it, configure the BMI270's aux interface: a BMI2_AUX sensor
   # config with cfg.aux.i2c_device_addr = 0x10, and read the magnetometer
