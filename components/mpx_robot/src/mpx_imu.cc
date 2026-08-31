@@ -86,7 +86,11 @@ bool             s_ready         = false;
 
 esp_err_t resolve_board_cfg(const mpx_imu_board_cfg_t **out)
 {
-    extern const esp_board_device_desc_t g_esp_board_devices[];
+    /* The generated board table is C. Without the extern "C" the C++ compiler
+     * mangles the name and this fails at link, not at compile -- which is a
+     * much worse place to find out. ESP-Claw's own consumer of this symbol
+     * (lua_module_imu.c) is a C file and so does not need the wrapper. */
+    extern "C" const esp_board_device_desc_t g_esp_board_devices[];
     const esp_board_device_desc_t *desc = g_esp_board_devices;
 
     while (desc != nullptr && desc->name != nullptr) {
