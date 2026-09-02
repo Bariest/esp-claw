@@ -106,7 +106,12 @@ hardware.
 4. **`mpx-cli doctor`.** It should reach the robot and report the toolchain.
 5. **`mpx-cli deploy`** on one of the SDK examples. This exercises upload, the
    sandbox and the ABI check in one command.
-6. **Only then power the servos**, and confirm the board variant with a single
+6. **Check the IMU** in the boot log. `mpx_imu` prints an I2C bus scan before
+   it initialises; the BMI270 should answer at **0x68**. If it answers at 0x69
+   instead, the schematic reading was wrong again and the board YAML needs
+   flipping back. Confirm tilt looks sane before anything is built on it --
+   the magnetometer work is deliberately waiting on this.
+7. **Only then power the servos**, and confirm the board variant with a single
    slow movement before trying a gait.
 
 ## Known rough edge
