@@ -22,6 +22,24 @@ CONFIG_APP_CLAW_SYSTEM_UI_ENABLE=n
 # No codecs on this board.
 CONFIG_CODEC_ES7210_SUPPORT=n
 
-# Console on the USB-Serial-JTAG most devkits expose, rather than the MP4's
-# CH340K on UART0.
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# Console on UART0, with USB-Serial-JTAG as a secondary sink.
+#
+# Not USB-Serial-JTAG as the primary. Devkits differ in which USB socket is
+# wired to what: some expose only a CH340/CP2102 on U0TXD/U0RXD, some expose
+# only the ESP32-S3's native USB, and some expose both as two COM ports. If
+# the console is USB-JTAG-only and you are watching the UART bridge, you see
+# the ROM bootloader (which always prints on UART0) and then nothing at all --
+# no second-stage bootloader banner, no app log, no panic backtrace. A crash
+# then looks like a silent boot loop.
+#
+# UART0 primary is the setting that is right on every devkit, and the
+# secondary sink means the native-USB port still shows the same output when
+# there is one. Log goes to both; keyboard input for the console commands
+# comes from UART0.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# Hold on panic instead of rebooting instantly. On an unknown board the
+# backtrace is the whole point, and a 0-second reboot delay scrolls it past.
+# The MP4 build keeps the reboot -- a robot should recover on its own.
+CONFIG_ESP_SYSTEM_PANIC_PRINT_HALT=y

@@ -550,7 +550,30 @@ void app_main(void)
     ESP_ERROR_CHECK(app_config_load(s_config));
     app_config_to_claw(s_config, s_claw_config);
     init_timezone(app_config_get_timezone(s_config)); // no need to check error
-    ESP_ERROR_CHECK(esp_board_manager_init());
+    /* Deliberately not ESP_ERROR_CHECK'd.
+     *
+     * This initialises every chip the selected board file declares. On the
+     * MP4 that is the ST7789, the ES7210 and the BMI270; if one of them does
+     * not answer -- an unseated FPC, a board revision with a different part --
+     * ESP_ERROR_CHECK aborts inside app_main, the panic handler reboots, and
+     * it does it again on the next boot. The visible symptom is a silent boot
+     * loop with no way in, which is exactly the situation you most need a
+     * console and a web UI for.
+     *
+     * Everything downstream already treats a missing device as a normal
+     * configuration: cap_display returns ESP_ERR_NOT_SUPPORTED with no panel,
+     * mpx_robot_init() and mpx_wasm_init() warn and continue, and `selftest`
+     * reports SKIP. So log loudly and carry on -- a half-initialised board
+     * that boots into the agent can be diagnosed; one that reboots cannot. */
+    {
+        const esp_err_t bm_err = esp_board_manager_init();
+        if (bm_err != ESP_OK) {
+            ESP_LOGE(TAG, "Board '%s' did not initialise: %s",
+                     CONFIG_ESP_BOARD_NAME, esp_err_to_name(bm_err));
+            ESP_LOGE(TAG, "Continuing without board peripherals. Run `selftest`"
+                          " on the console to see which ones are missing.");
+        }
+    }
     ESP_ERROR_CHECK(app_fs_init());
 
     /* Publish the resolved storage roots so any component can compose paths
@@ -588,14 +611,28 @@ void app_main(void)
 
     ESP_ERROR_CHECK(wifi_manager_init());
 
-    ESP_ERROR_CHECK(app_claw_ui_start());
+    /* Also non-fatal, for the same reason: on a board whose panel failed to
+     * initialise above, this is where a display-less build would otherwise
+     * abort. Without a UI the agent still runs and the web UI still serves. */
+    {
+        const esp_err_t ui_err = app_claw_ui_start();
+        if (ui_err != ESP_OK) {
+            ESP_LOGE(TAG, "UI did not start: %s -- continuing headless",
+                     esp_err_to_name(ui_err));
+        }
+    }
 
 #if CONFIG_MP4_ROBOT_ENABLE
     /* Straight after the display service is up, so the eyes are the first
      * thing on the panel -- before Wi-Fi, before the agent. On a robot that
      * takes a few seconds to find a network, a face that is already blinking
      * is the difference between "booting" and "broken". */
-    ESP_ERROR_CHECK(cap_display_face_start());
+    {
+        const esp_err_t face_err = cap_display_face_start();
+        if (face_err != ESP_OK) {
+            ESP_LOGW(TAG, "Face not started: %s", esp_err_to_name(face_err));
+        }
+    }
 #endif
 
     ESP_ERROR_CHECK(http_server_init(&(http_server_config_t) {
