@@ -91,6 +91,32 @@ mpx-cli search      browse the catalogue
 
 ## Testing ESP-Claw on a different board
 
+**Do not flash the MP4 build onto other hardware.** `main.c` wraps
+`esp_board_manager_init()` in `ESP_ERROR_CHECK`, and the MP4 board declares an
+ST7789, an ES7210 and a BMI270. On a devkit where those chips are absent,
+device init fails, the check aborts, and the board sits in a boot loop -- which
+tells you nothing about ESP-Claw.
+
+Build for the generic board instead:
+
+```bash
+idf.py bmgr -c ./boards -b generic_esp32s3
+rm sdkconfig
+idf.py build flash monitor
+```
+
+That board declares no devices, so nothing can fail for want of a chip. It
+turns off the panel, the codecs and the voice models, keeps the agent, the web
+server, the skill runtime and the `selftest` command, and assumes 8 MB flash.
+Change `CONFIG_ESPTOOLPY_FLASHSIZE` in its `sdkconfig.defaults.board` if yours
+differs -- the partition table is chosen from it.
+
+Then:
+
+```
+selftest --other-board
+```
+
 The firmware runs on any ESP32-S3 with enough flash. None of the MP4 wiring
 will be there, so tell the self-test that:
 

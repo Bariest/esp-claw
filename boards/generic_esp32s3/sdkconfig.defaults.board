@@ -1,0 +1,27 @@
+# Generic ESP32-S3 devkit: ESP-Claw, the web UI and the agent, with none of
+# the MP4 hardware.
+
+# Assume the common devkit: 8 MB flash, no PSRAM guarantee. Override if yours
+# differs -- CONFIG_ESPTOOLPY_FLASHSIZE picks the partition table.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# Kept on so the `selftest` console command is built. Its robot checks report
+# nothing found, which is the correct answer here; mpx_robot_init() failing is
+# non-fatal by design.
+CONFIG_MP4_ROBOT_ENABLE=y
+
+# Off. esp-sr's models need a 2904K "model" partition that only exists in
+# partitions_16MB.csv, and none of it is testable without microphones.
+CONFIG_MP4_VOICE_ENABLE=n
+
+# No panel, so nothing should try to drive one.
+CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=n
+CONFIG_APP_CLAW_SYSTEM_UI_ENABLE=n
+
+# No codecs on this board.
+CONFIG_CODEC_ES7210_SUPPORT=n
+
+# Console on the USB-Serial-JTAG most devkits expose, rather than the MP4's
+# CH340K on UART0.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

@@ -362,7 +362,11 @@ static void test_servo(void)
     int total = 0;
 
     for (int b = 0; b < 4; b++) {
-        char label[32], detail[96];
+        /* Three ids at most, so "10 11 12" -- nine bytes with the NUL. Sized
+         * to that rather than generously, because the compiler reasons about
+         * the declared size, not the reachable content: a roomy buffer here
+         * makes the worst case below overflow `part` and fail the build. */
+        char label[32], detail[16];
         int alive = 0;
         size_t at = 0;
 
