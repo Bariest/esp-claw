@@ -37,9 +37,9 @@
 #include "app_capabilities.h"
 #include "cap_robot.h"
 #include "cap_mpx_skill.h"
+#include "mpx_selftest.h"
 #if CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
 #include "cap_display.h"
-#include "mpx_selftest.h"
 #endif
 #endif
 
@@ -698,7 +698,9 @@ void app_main(void)
 #endif
 
     register_wifi_command();
+#if CONFIG_MP4_ROBOT_ENABLE
     register_selftest_command();
+#endif
 
 #if APP_ENABLE_MEM_LOG
     /* Start memory monitor: print internal free, min free, PSRAM free every 20s */

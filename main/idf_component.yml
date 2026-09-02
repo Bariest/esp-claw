@@ -91,6 +91,16 @@ dependencies:
     - if: $CONFIG{ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT} == True
     path: ../components/cap_display
 
+  # The `selftest` console command. Declared here like every other local
+  # component: main only reaches a component's headers through a dependency,
+  # and dropping a new directory into components/ does not always make CMake
+  # reconfigure, so relying on auto-discovery fails in a way that looks like a
+  # missing file.
+  mpx_selftest:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_selftest
+
   # Acoustic front end, WakeNet and MultiNet. Large: it brings esp-dl and
   # esp-dsp with it, and the first build downloads several hundred MB.
   espressif/esp-sr:
