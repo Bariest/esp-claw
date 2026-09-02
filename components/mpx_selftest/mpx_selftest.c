@@ -54,7 +54,14 @@
 
 #include "esp_board_device.h"
 #include "esp_board_periph.h"
-#include "periph_ledc.h"
+/* Only on the include path when the board declares a `ledc` peripheral. A
+ * board without one still has to build; the backlight check reports SKIP. */
+#if defined(__has_include)
+#  if __has_include("periph_ledc.h")
+#    include "periph_ledc.h"
+#    define SELFTEST_HAS_LEDC 1
+#  endif
+#endif
 
 #include "claw_paths.h"
 
@@ -415,6 +422,9 @@ static void test_backlight(void)
 {
     section("Backlight (LEDC on GPIO 42)");
 
+#if !SELFTEST_HAS_LEDC
+    r_skip("Backlight", "no LEDC peripheral on this board");
+#else
     void *handle = NULL;
     if (esp_board_device_get_handle("lcd_brightness", &handle) != ESP_OK || !handle) {
         r_skip("Backlight", "device 'lcd_brightness' not available");
@@ -434,6 +444,7 @@ static void test_backlight(void)
 
     r_look("Backlight", "did it go dark to bright? if it went bright to dark, "
                         "output_invert is wrong");
+#endif /* SELFTEST_HAS_LEDC */
 }
 
 /* ── Display ───────────────────────────────────────────────────────────────

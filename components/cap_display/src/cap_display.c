@@ -34,7 +34,17 @@
 #include "esp_board_device.h"
 #include "esp_log.h"
 #include "lvgl.h"
-#include "periph_ledc.h"
+/* The backlight is a LEDC channel, and periph_ledc.h only lands on the include
+ * path when the selected board declares a `ledc` peripheral. A board without
+ * one -- boards/generic_esp32s3, say -- must still build: this file already
+ * copes with the brightness DEVICE being absent at runtime, so it should cope
+ * with the PERIPHERAL being absent at compile time the same way. */
+#if defined(__has_include)
+#  if __has_include("periph_ledc.h")
+#    include "periph_ledc.h"
+#    define CAP_DISPLAY_HAS_LEDC 1
+#  endif
+#endif
 
 #include "display_service.h"
 
@@ -439,13 +449,18 @@ static esp_err_t execute_set_brightness(const char *input_json,
     cJSON *root;
     const cJSON *percent_json;
     void *handle = NULL;
-    periph_ledc_handle_t *ledc;
     int percent;
-    uint32_t duty;
 
     if (!input_json || !output || output_size == 0) {
         return ESP_ERR_INVALID_ARG;
     }
+#if !CAP_DISPLAY_HAS_LEDC
+    /* No LEDC peripheral on this board, so no dimmable backlight to reach.
+     * Same answer the runtime path below gives when the device is missing --
+     * the tool stays callable and says why rather than not existing. */
+    snprintf(output, output_size, "Error: this board has no controllable backlight.");
+    return ESP_ERR_NOT_SUPPORTED;
+#else
     root = cJSON_Parse(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: input must be a JSON object");
@@ -473,8 +488,8 @@ static esp_err_t execute_set_brightness(const char *input_json,
     /* The board declares the backlight as a 10-bit LEDC channel. Duty is
      * scaled against that resolution; output_invert in the board YAML handles
      * the P-channel FET, so 100 here always means bright. */
-    ledc = (periph_ledc_handle_t *)handle;
-    duty = (uint32_t)(((1U << LEDC_TIMER_10_BIT) - 1U) * percent / 100);
+    periph_ledc_handle_t *ledc = (periph_ledc_handle_t *)handle;
+    uint32_t duty = (uint32_t)(((1U << LEDC_TIMER_10_BIT) - 1U) * percent / 100);
 
     if (ledc_set_duty(ledc->speed_mode, ledc->channel, duty) != ESP_OK ||
             ledc_update_duty(ledc->speed_mode, ledc->channel) != ESP_OK) {
@@ -484,6 +499,7 @@ static esp_err_t execute_set_brightness(const char *input_json,
 
     snprintf(output, output_size, "{\"ok\":true,\"percent\":%d}", percent);
     return ESP_OK;
+#endif /* CAP_DISPLAY_HAS_LEDC */
 }
 
 /* ── Descriptors ───────────────────────────────────────────────────────── */
