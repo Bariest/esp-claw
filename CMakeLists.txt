@@ -6,6 +6,26 @@ include("${CMAKE_SOURCE_DIR}/tools/cmake/flash_partition_defaults.cmake")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(mp4_claw VERSION 0.1.0)
 
+# esp-sr's model packer prints a box-drawing rule in its report, which raises
+# UnicodeEncodeError on a Windows console using the cp1252 codec -- failing the
+# build at "Move and Pack models", long before any of our code, with an error
+# that looks nothing like its cause. Setting PYTHONIOENCODING fixes it but has
+# to be remembered in every shell, which is not a fix.
+#
+# Tell its stdout to substitute characters it cannot encode instead of raising.
+# Patched after project(), because that is when the component manager has
+# populated managed_components/, and re-applied on every configure so a
+# re-downloaded component does not quietly bring the bug back.
+edge_agent_patch_file_replace_literal(
+    "${CMAKE_SOURCE_DIR}/managed_components/espressif__esp-sr/model/movemodel.py"
+    [=[sys.dont_write_bytecode = True]=]
+    [=[sys.dont_write_bytecode = True
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(errors='replace')]=]
+    "esp_sr_movemodel_console_encoding"
+    ALLOW_MISSING
+)
+
 set(EDGE_AGENT_FATFS_IMAGE_ROOT "${CMAKE_SOURCE_DIR}/fatfs_image")
 set(EDGE_AGENT_FATFS_SOURCE_ROOT "${EDGE_AGENT_FATFS_IMAGE_ROOT}/storage")
 set(EDGE_AGENT_FATFS_BUILD_ROOT "${CMAKE_BINARY_DIR}/fatfs_image")
