@@ -52,17 +52,22 @@ YAML. `sdkconfig.defaults.board` is copied into the generated
 file is on `SDKCONFIG_DEFAULTS`. Edit the board defaults without rerunning
 bmgr and your settings are simply absent, with nothing to say so.
 
-Config defaults also only apply to a **fresh** `sdkconfig`. An existing one
-wins, so a new default silently does nothing:
+Config defaults only apply to a **fresh** `sdkconfig`; an existing one wins.
+`bmgr` handles that for you when the *board changes*, but **not** when you edit
+`sdkconfig.defaults.board` for the board already selected -- it logs
+"Board unchanged, preserving sdkconfig" and your new defaults silently do
+nothing. That case needs the delete:
 
 ```bash
 idf.py bmgr -c ./boards -b mp4_esp32_core   # regenerate board_manager.defaults
-rm sdkconfig                                # let the defaults be read again
+rm sdkconfig                                # only needed when the board is the same
 idf.py build
 ```
 
-Deleting `sdkconfig` discards anything set through menuconfig -- the LLM API
-key and `MP4_GATEWAY_HOST` being the ones that matter here.
+Either way, losing `sdkconfig` discards anything set through menuconfig -- the
+LLM API key and `MP4_GATEWAY_HOST` being the ones that matter here. The backup
+`bmgr` leaves at `components/gen_bmgr_codes/sdkconfig.bmgr_board.old` is where
+to go looking for them.
 
 The console is the CH340K on UART0, not USB-Serial-JTAG.
 
@@ -93,19 +98,19 @@ correct either way.
 ```bash
 idf.py fullclean                                    # recommended, see below
 idf.py bmgr -c ./boards -b mp4_esp32_core           # or generic_esp32s3
-rm sdkconfig
 idf.py build flash monitor
 ```
 
-Both of the middle steps are needed, for different reasons. `bmgr` regenerates
-`components/gen_bmgr_codes/board_manager.defaults`, which is the only place the
-board's settings reach `SDKCONFIG_DEFAULTS` -- and it is also where
-`flash_partition_defaults.cmake` scrapes `CONFIG_ESPTOOLPY_FLASHSIZE_*` to pick
-`partitions_<size>.csv`. Deleting `sdkconfig` is what lets those defaults apply
-at all, since an existing config always wins.
+No `rm sdkconfig` here: **when the board changes, `bmgr` deletes `sdkconfig`
+itself**, backing it up to
+`components/gen_bmgr_codes/sdkconfig.bmgr_board.old`. It clears `CMakeCache.txt`
+too, so no separate reconfigure is needed either.
 
-Get the order wrong and it fails quietly: the build succeeds with the previous
-board's configuration.
+`bmgr` also regenerates `components/gen_bmgr_codes/board_manager.defaults`,
+which is the only place a board's settings reach `SDKCONFIG_DEFAULTS` -- and
+where `flash_partition_defaults.cmake` scrapes `CONFIG_ESPTOOLPY_FLASHSIZE_*`
+to pick `partitions_<size>.csv`. So the partition table follows the board
+automatically.
 
 `fullclean` is not strictly required, but a board switch changes the partition
 table, whether esp-sr is in the build at all, and the staged filesystem images.
