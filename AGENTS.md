@@ -181,6 +181,41 @@ Five things that are not obvious and have already cost time once:
 `boards/mp4_esp32_core/README.md` has the full pin table and the list of values
 that still need confirming on hardware.
 
+## Silent boot loop: read this before debugging anything else
+
+Symptom: the terminal repeats the ROM banner (`ESP-ROM:esp32s3-...`, `load:`,
+`entry 0x403c8920`) and nothing else. No `I (31) boot:` line, no app log, no
+backtrace.
+
+The missing **second-stage bootloader banner is the tell**. The ROM bootloader
+always prints on UART0 no matter how the project is configured; everything
+after `entry` prints on whatever `CONFIG_ESP_CONSOLE_*` selects. If you see one
+and not the other, the console is on a port you are not watching -- almost
+always USB-Serial-JTAG while you are on the UART bridge. The chip is not hung;
+it is panicking and rebooting with the evidence on the other port.
+
+`rst:0xc (RTC_SW_CPU_RST)` with `Saved PC: ... esp_restart_noos` confirms it:
+that is a *software* restart, so app code ran and called it -- the panic
+handler, in practice.
+
+Both boards now default to UART0 primary with USB-Serial-JTAG as a secondary
+sink, so this should not recur. If you change a console setting, change it in
+`boards/<board>/sdkconfig.defaults.board` and remember the rule below.
+
+## Editing sdkconfig.defaults.board does nothing on its own
+
+`idf.py bmgr <board>` deletes `sdkconfig` **only when the board changes**. On an
+unchanged board it prints `Board unchanged, preserving sdkconfig` and your edit
+never reaches the build -- the old value is already in `sdkconfig` and wins.
+
+    idf.py bmgr generic_esp32s3
+    del sdkconfig            # rm sdkconfig on POSIX -- this is the step people skip
+    idf.py build
+
+This is what made the esp-sr model options appear to be ignored for an
+afternoon. Check `components/gen_bmgr_codes/board_manager.defaults` if you want
+to see what was actually handed to the build.
+
 ## The plan
 
 `.agents/mp4-integration-plan.md` is the phase-by-phase integration plan, with
