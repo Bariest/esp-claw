@@ -115,6 +115,19 @@ typedef struct { uint16_t start, status; servo_fb_sub_t s1, s2, s3; uint16_t che
 
 static spi_device_handle_t dev_left_front, dev_right_front, dev_left_rear, dev_right_rear;
 
+/* Set only when all four devices are attached. Everything that touches the bus
+ * checks it first.
+ *
+ * Without this, a board where spi_bus_initialize() or spi_bus_add_device()
+ * failed still has the gait task running at 50 Hz against NULL handles, and
+ * spi_master logs "check_trans_valid(1108): invalid dev handle" at ERROR level
+ * on every one. That is roughly 200 lines a second interleaved into the
+ * console from another core, which does not merely look bad -- it corrupts
+ * every other log line on the way out, so the message telling you what
+ * actually went wrong arrives shredded. Diagnosing the real fault becomes
+ * impossible precisely when you most need the log. */
+static bool s_bus_ready;
+
 /* cached feedback, indexed by PHYSICAL channel (index 0 == physical chan 1) */
 static uint16_t fb_position[12];
 static int16_t  fb_current[12];
@@ -172,6 +185,12 @@ static uint16_t sh_fkd[12]   = { 0 };
 static esp_err_t spi_xfer(uint8_t board, uint8_t size, uint8_t *tx, uint8_t *rx)
 {
     spi_transaction_t t;
+
+    /* No driver boards attached. Fail quietly: the caller already reports it
+     * once, and this path runs at gait rate. */
+    if (!s_bus_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
     memset(&t, 0, sizeof(t));
     t.length    = (size_t)size * 8;
     t.tx_buffer = tx;
@@ -191,6 +210,11 @@ void driver_board_power(bool on)
      * there is no enable pin to toggle. Kept so callers -- and any WASM skill
      * compiled against the old ABI -- still link and behave sanely.        */
     (void)on;
+}
+
+bool driver_board_is_ready(void)
+{
+    return s_bus_ready;
 }
 
 bool driver_board_init(void)
@@ -256,6 +280,7 @@ bool driver_board_init(void)
         }
     }
 
+    s_bus_ready = true;
     ESP_LOGI(TAG, "driver board SPI%d init OK (4 boards, 12 servos, variant %d)",
              SPI_MASTER_ID + 1, SERVO_BOARD);
     return true;

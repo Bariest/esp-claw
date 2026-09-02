@@ -672,7 +672,14 @@ void app_main(void)
             ESP_LOGW(TAG, "Could not move the AP to %s: %s -- mpx-cli will need "
                           "MPX_HOST set", MP4_AP_IP_ADDR, esp_err_to_name(ap_ip_err));
         }
-        ESP_ERROR_CHECK(http_server_start());
+        /* Non-fatal, like the board and UI init above. A route that fails to
+         * register costs one endpoint; aborting here costs the console, the
+         * agent and any chance of reading why. The error names the route. */
+        const esp_err_t http_err = http_server_start();
+        if (http_err != ESP_OK) {
+            ESP_LOGE(TAG, "HTTP server did not start: %s -- web UI unavailable, "
+                          "console still works", esp_err_to_name(http_err));
+        }
         if (captive_dns_start(&(captive_dns_config_t) {
                 .ap_netif = wifi_manager_get_ap_netif(),
                 .configure_dhcp_dns = true,

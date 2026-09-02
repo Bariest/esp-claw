@@ -140,12 +140,33 @@ esp_err_t http_server_start(void)
     ESP_RETURN_ON_ERROR(http_server_register_mpx_wifi_routes(s_ctx.server), TAG, "Failed to register wifi routes");
     ESP_RETURN_ON_ERROR(http_server_register_mpx_market_routes(s_ctx.server), TAG, "Failed to register marketplace routes");
     ESP_RETURN_ON_ERROR(http_server_register_mpx_chat_routes(s_ctx.server), TAG, "Failed to register chat routes");
-    /* Last: its catch-all matches every GET, and httpd hands a request to the
-     * first entry that matches in registration order. */
-    ESP_RETURN_ON_ERROR(http_server_register_mpx_web_routes(s_ctx.server), TAG, "Failed to register web routes");
 #if CONFIG_APP_CLAW_CAP_LUA
     ESP_RETURN_ON_ERROR(http_server_register_mpx_lua_routes(s_ctx.server), TAG, "Failed to register lua routes");
 #endif
+    /* ── ADD NOTHING BELOW THIS LINE ──────────────────────────────────────
+     *
+     * http_server_register_mpx_web_routes() registers a "/*" catch-all, and
+     * this server is configured with httpd_uri_match_wildcard (see
+     * config.uri_match_fn above). That match function is used for TWO things:
+     * dispatching a request, and the duplicate check inside
+     * httpd_register_uri_handler().
+     *
+     * So once "/*" is registered, registering ANY later GET route asks httpd
+     * "does an existing entry match this URI?", "/*" answers yes, and the
+     * registration is refused with ESP_ERR_HTTPD_HANDLER_EXISTS -- reported as
+     * `handler /v1/... with method 1 already registered`, which reads like a
+     * genuine duplicate and is not one. http_server_start() then returns an
+     * error and app_main aborts.
+     *
+     * POST routes survive, because the catch-all is GET-only. That is why the
+     * symptom was two dead endpoints (/v1/lua/list and /v1/lua/read) out of
+     * six rather than all of them, which made it look like a collision with
+     * something in ESP-Claw. Nothing collided; the order was wrong.
+     *
+     * Registration order still decides dispatch, so the catch-all also has to
+     * stay last for the routes above to be reachable at all. Both constraints
+     * point the same way: everything else first, this last, nothing after. */
+    ESP_RETURN_ON_ERROR(http_server_register_mpx_web_routes(s_ctx.server), TAG, "Failed to register web routes");
 #endif
     ESP_RETURN_ON_ERROR(httpd_register_err_handler(s_ctx.server, HTTPD_404_NOT_FOUND, http_server_captive_404_handler),
                         TAG, "Failed to register captive 404 handler");

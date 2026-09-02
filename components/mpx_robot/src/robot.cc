@@ -396,7 +396,8 @@ bool init()
     // that host, so driver_board_init() owns it; it still tolerates an already-
     // IMU brought it up first.
     ESP_LOGI(TAG, "Initialising SPI servo driver boards...");
-    if (!driver_board_init()) {
+    const bool servos_up = driver_board_init();
+    if (!servos_up) {
         ESP_LOGE(TAG, "Driver board init FAILED — no servo control");
     } else {
         ESP_LOGI(TAG, "Driver board init done");
@@ -408,7 +409,7 @@ bool init()
     // whole silent board of three points at that board's CS line or its power
     // rather than at the servos.
     vTaskDelay(pdMS_TO_TICKS(100));
-    {
+    if (servos_up) {
         int alive = 0, n = 0;
         char list[64];
         list[0] = '\0';
@@ -468,6 +469,20 @@ bool init()
     }
 
     // ── Spawn gait task on core 1 ───────────────────────────────
+    //
+    // Only when there is a bus to drive. The gait task runs at 50 Hz and every
+    // cycle writes twelve setpoints; with no driver boards attached that is a
+    // hot loop doing nothing, on a core, at priority 22, forever. The bus
+    // layer now refuses those writes quietly, so this is not required for
+    // correctness -- but a task that cannot do its job should not be running,
+    // and not starting it is also what makes `robot_init` return false so the
+    // caller can say so once instead of the log saying it continuously.
+    if (!servos_up) {
+        ESP_LOGW(TAG, "Gait task not started — no driver boards. The agent, "
+                      "the web UI and every non-servo API still work.");
+        return false;
+    }
+
     BaseType_t rv = xTaskCreatePinnedToCore(
         [](void *) { gait_task(); },
         "gait", 8192, nullptr, 22, &s_gait_task_handle, 1);

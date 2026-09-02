@@ -192,6 +192,11 @@ static inline int db_phys_inv(int physical){
  * concurrently without corrupting a config request/reply pair. */
 bool driver_board_init(void);
 
+/* True once all four SPI devices are attached. False means every bus call is a
+ * quiet no-op -- no servos, no feedback, and deliberately no log spam. Check
+ * this before starting anything that drives the bus in a loop. */
+bool driver_board_is_ready(void);
+
 /* Enable / disable servo bus power.
  *
  * No-op on the MP4 ESP32 CORE: there is no power-enable pin, the servo rail
