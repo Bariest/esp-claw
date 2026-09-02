@@ -89,6 +89,24 @@ mpx-cli auth        log in
 mpx-cli search      browse the catalogue
 ```
 
+## Testing ESP-Claw on a different board
+
+The firmware runs on any ESP32-S3 with enough flash. None of the MP4 wiring
+will be there, so tell the self-test that:
+
+```
+selftest --other-board
+```
+
+Checks that describe MP4 wiring then report **WARN** rather than FAIL. What
+still reports for real is everything the firmware controls: the partitions,
+the SYSTEM and DATA mounts, RAM, and the console. If those pass, ESP-Claw
+came up correctly and the agent, web server and skill runtime have what they
+need -- which is the question worth answering before the real board arrives.
+
+Expect the I2C section to report a silent bus, and the servo and display
+sections to find nothing. That is the correct result on other hardware.
+
 ## Bring-up order
 
 Do these in order the first time. The first step is the one that protects

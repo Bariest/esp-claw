@@ -79,7 +79,14 @@ static const char *TAG = "selftest";
  * a wrong full-scale range is off by a factor of two or more, not by 15%. */
 #define SELFTEST_G_TOLERANCE  0.15f
 
-static int s_pass, s_fail, s_skip;
+static int s_pass, s_fail, s_skip, s_warn;
+
+/* Set by --other-board. The firmware-side checks (partitions, mounts, RAM)
+ * are true of any board this is flashed to, so they stay real. The
+ * hardware-side ones describe MP4 wiring specifically, and on a different
+ * board their failing is the expected answer, not a fault -- reporting them
+ * as FAIL would drown the result that was actually being looked for. */
+static bool s_other_board;
 
 /* ── Result reporting ──────────────────────────────────────────────────────
  *
@@ -102,6 +109,22 @@ static void r_skip(const char *what, const char *why)
 {
     s_skip++;
     printf("  SKIP  %-22s %s\n", what, why ? why : "");
+}
+
+static void r_warn(const char *what, const char *detail)
+{
+    s_warn++;
+    printf("  WARN  %-22s %s\n", what, detail ? detail : "");
+}
+
+/* A check that can only pass on MP4 hardware. */
+static void r_board(const char *what, const char *detail)
+{
+    if (s_other_board) {
+        r_warn(what, detail);
+    } else {
+        r_fail(what, detail);
+    }
 }
 
 static void r_look(const char *what, const char *detail)
@@ -136,7 +159,7 @@ static void test_system(void)
     } else {
         snprintf(detail, sizeof(detail), "expected 8 MB, found %u KB -- octal PSRAM not configured?",
                  (unsigned)(psram / 1024));
-        r_fail("PSRAM", detail);
+        r_board("PSRAM", detail);
     }
 
     snprintf(detail, sizeof(detail), "%u KB free", (unsigned)(internal_free / 1024));
@@ -194,17 +217,34 @@ static void test_i2c(void)
         return;
     }
 
-    bool found_bmi = false, found_es = false;
-    int others = 0;
+    /* The driver logs an error for every address that does not answer. On a
+     * board with nothing on the bus that is 112 identical error lines, which
+     * buries the report this command exists to print. Silence it for the scan
+     * and put the level back afterwards. */
+    esp_log_level_t prev = esp_log_level_get("i2c.master");
+    esp_log_level_set("i2c.master", ESP_LOG_NONE);
+
+    bool found_bmi = false, found_es = false, found_69 = false;
+    int others = 0, answered = 0;
     char extra[96] = {0};
     size_t at = 0;
 
     for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-        if (i2c_master_probe(bus, addr, 50) != ESP_OK) {
+        /* A short timeout: a device that is there acknowledges immediately,
+         * and one that is not costs this whole budget. At 200 ms -- the
+         * driver's default -- a silent bus takes 22 seconds and trips the
+         * task watchdog. */
+        if (i2c_master_probe(bus, addr, 20) != ESP_OK) {
+            if ((addr & 0x0F) == 0x0F) {
+                vTaskDelay(1);   /* let the watchdog and the console breathe */
+            }
             continue;
         }
+        answered++;
         if (addr == SELFTEST_I2C_BMI270) {
             found_bmi = true;
+        } else if (addr == 0x69) {
+            found_69 = true;
         } else if (addr == SELFTEST_I2C_ES7210) {
             found_es = true;
         } else if (at + 6 < sizeof(extra)) {
@@ -212,28 +252,39 @@ static void test_i2c(void)
             others++;
         }
     }
+    esp_log_level_set("i2c.master", prev);
+    esp_board_periph_unref_handle("i2c_master");
+
+    /* Nothing at all is one finding, not two failures. It means the bus is
+     * silent -- no devices, no pull-ups, or the wrong pins -- and saying that
+     * once is more use than reporting each expected chip as missing. */
+    if (answered == 0) {
+        r_board("I2C bus", "no device answered at any address");
+        printf("        Either nothing is attached, the pull-ups are absent, or SDA/SCL\n"
+               "        are not on GPIO 1 and 2. Expected if this is not the MP4 board.\n");
+        return;
+    }
 
     if (found_bmi) {
         r_pass("BMI270 @ 0x68", "IMU answered on the primary address");
+    } else if (found_69) {
+        /* Worth naming: this is the reading I got wrong twice. */
+        r_board("BMI270 @ 0x68",
+                "silent, but something answered at 0x69 -- SDO is strapped high, "
+                "set i2c_addr: 0x69 in board_devices.yaml");
     } else {
-        /* Worth naming, because this is the reading I got wrong twice. */
-        bool at69 = (i2c_master_probe(bus, 0x69, 50) == ESP_OK);
-        r_fail("BMI270 @ 0x68", at69
-               ? "silent, but something answered at 0x69 -- SDO is strapped high, "
-                 "set i2c_addr: 0x69 in board_devices.yaml"
-               : "no answer -- check I2C wiring, pull-ups, and that the IMU is powered");
+        r_board("BMI270 @ 0x68", "no answer, though other devices are on the bus");
     }
 
     if (found_es) {
         r_pass("ES7210 @ 0x41", "audio ADC answered");
     } else {
-        r_fail("ES7210 @ 0x41", "no answer -- microphones will not work");
+        r_board("ES7210 @ 0x41", "no answer -- microphones will not work");
     }
 
     if (others > 0) {
         r_look("Other devices", extra);
     }
-    esp_board_periph_unref_handle("i2c_master");
 }
 
 /* ── IMU ───────────────────────────────────────────────────────────────────
@@ -263,9 +314,9 @@ static void test_imu(void)
     if (mag > 0.01f && fabsf(mag - 1.0f) <= SELFTEST_G_TOLERANCE) {
         r_pass("Accelerometer", detail);
     } else if (mag <= 0.01f) {
-        r_fail("Accelerometer", "reads zero on every axis -- not sampling");
+        r_board("Accelerometer", "reads zero on every axis -- not sampling");
     } else {
-        r_fail("Accelerometer", detail);
+        r_board("Accelerometer", detail);
         printf("        |a| should be 1.00 g at rest. Far off usually means the "
                "full-scale range does not match the driver.\n");
     }
@@ -274,7 +325,7 @@ static void test_imu(void)
     if (spin < 15.0f) {
         r_pass("Gyroscope", detail);
     } else {
-        r_fail("Gyroscope", detail);
+        r_board("Gyroscope", detail);
         printf("        Expected near zero on a stationary robot. Hold it still and retry.\n");
     }
 
@@ -330,9 +381,9 @@ static void test_servo(void)
         } else if (alive > 0) {
             char part[128];
             snprintf(part, sizeof(part), "only %d of 3 answered (ids %s)", alive, detail);
-            r_fail(label, part);
+            r_board(label, part);
         } else {
-            r_fail(label, "no servo answered");
+            r_board(label, "no servo answered");
         }
     }
 
@@ -464,6 +515,7 @@ static struct {
     struct arg_lit *backlight;
     struct arg_lit *buttons;
     struct arg_int *hold;
+    struct arg_lit *other;
     struct arg_end *end;
 } s_args;
 
@@ -475,15 +527,25 @@ static int selftest_cmd(int argc, char **argv)
         return 1;
     }
 
+    s_other_board = s_args.other->count > 0;
+
     bool any = s_args.system_->count || s_args.i2c->count || s_args.imu->count ||
                s_args.servo->count || s_args.display->count ||
                s_args.backlight->count || s_args.buttons->count;
     bool all = !any;
     uint32_t hold = s_args.hold->count ? (uint32_t)s_args.hold->ival[0] * 1000u : 10000u;
 
-    s_pass = s_fail = s_skip = 0;
+    s_pass = s_fail = s_skip = s_warn = 0;
     printf("\nMP4 ESP32 CORE self-test\n");
-    printf("Servo rail should be UNPOWERED for a first run.\n");
+    if (s_other_board) {
+        printf("\n  ** --other-board: this is NOT MP4 hardware **\n"
+               "  Checks that describe MP4 wiring report WARN instead of FAIL.\n"
+               "  A WARN here says nothing about the firmware. What is being\n"
+               "  tested is whether ESP-Claw itself came up: partitions, mounts,\n"
+               "  RAM, console. Those still report PASS or FAIL for real.\n\n");
+    } else {
+        printf("Servo rail should be UNPOWERED for a first run.\n");
+    }
 
     if (all || s_args.system_->count)   { test_system(); }
     if (all || s_args.i2c->count)       { test_i2c(); }
@@ -493,9 +555,13 @@ static int selftest_cmd(int argc, char **argv)
     if (all || s_args.display->count)   { test_display(hold); }
     if (all || s_args.buttons->count)   { test_buttons(8000); }
 
-    printf("\n%d passed, %d failed, %d skipped\n", s_pass, s_fail, s_skip);
-    if (s_fail == 0) {
+    printf("\n%d passed, %d failed, %d warned, %d skipped\n",
+           s_pass, s_fail, s_warn, s_skip);
+    if (s_fail == 0 && s_warn == 0) {
         printf("No mismatches found. LOOK items still need your eyes.\n\n");
+    } else if (s_fail == 0) {
+        printf("Nothing the firmware controls is wrong. The WARN lines are MP4\n"
+               "hardware that is not on this board -- expected with --other-board.\n\n");
     } else {
         printf("Each FAIL names what was expected -- board files, wiring, or both.\n\n");
     }
@@ -512,6 +578,7 @@ void register_selftest_command(void)
     s_args.backlight = arg_lit0(NULL, "backlight", "Ramp the backlight to check output_invert");
     s_args.buttons   = arg_lit0(NULL, "buttons",   "Wait for BOOT and WAKE presses");
     s_args.hold      = arg_int0(NULL, "hold", "<s>", "Seconds to hold the test pattern (default 10)");
+    s_args.other     = arg_lit0(NULL, "other-board", "Not MP4 hardware: report wiring checks as WARN, not FAIL");
     s_args.end       = arg_end(8);
 
     const esp_console_cmd_t cmd = {
@@ -521,7 +588,8 @@ void register_selftest_command(void)
                 "Examples:\n"
                 "  selftest                 everything\n"
                 "  selftest --i2c --imu     just the sensors\n"
-                "  selftest --display --hold 30\n",
+                "  selftest --display --hold 30\n"
+                "  selftest --other-board   on a different ESP32-S3, to check ESP-Claw itself\n",
         .func = selftest_cmd,
         .argtable = &s_args,
     };
