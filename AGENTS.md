@@ -88,6 +88,37 @@ chcp 65001
 That affects only how tables from `idf.py size` are drawn; the numbers are
 correct either way.
 
+### Switching between boards
+
+```bash
+idf.py fullclean                                    # recommended, see below
+idf.py bmgr -c ./boards -b mp4_esp32_core           # or generic_esp32s3
+rm sdkconfig
+idf.py build flash monitor
+```
+
+Both of the middle steps are needed, for different reasons. `bmgr` regenerates
+`components/gen_bmgr_codes/board_manager.defaults`, which is the only place the
+board's settings reach `SDKCONFIG_DEFAULTS` -- and it is also where
+`flash_partition_defaults.cmake` scrapes `CONFIG_ESPTOOLPY_FLASHSIZE_*` to pick
+`partitions_<size>.csv`. Deleting `sdkconfig` is what lets those defaults apply
+at all, since an existing config always wins.
+
+Get the order wrong and it fails quietly: the build succeeds with the previous
+board's configuration.
+
+`fullclean` is not strictly required, but a board switch changes the partition
+table, whether esp-sr is in the build at all, and the staged filesystem images.
+A full rebuild costs ten minutes and removes every question about stale
+artefacts -- worth it when the point of the exercise is to trust the result.
+
+`idf.py flash` writes the bootloader, partition table, app and all three data
+partitions, which is what a changed layout needs.
+
+The console moves with the board: the MP4 uses the CH340K on UART0
+(`ESP_CONSOLE_UART_DEFAULT`), the generic devkit uses USB-Serial-JTAG. Expect a
+different port, and a board that appears to say nothing if you open the old one.
+
 ## How ESP-Claw components enter the build
 
 Through IDF Component Manager `path:` dependencies in `main/idf_component.yml`,
