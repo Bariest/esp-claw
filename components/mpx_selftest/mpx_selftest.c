@@ -1,0 +1,530 @@
+/*
+ * SPDX-FileCopyrightText: 2026 MangDang
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * `selftest` -- does the software agree with the hardware?
+ *
+ * Every pin in boards/mp4_esp32_core/ was read off a schematic and has never
+ * carried a signal. This command is how you find out which of those readings
+ * were right, in one pass, on a bench, before anything depends on them.
+ *
+ * ── It does not move the servos ───────────────────────────────────────────
+ *
+ * That is the point of running it first. MP4_ROBOT_SERVO_BOARD_VARIANT decides
+ * which physical joint a logical servo id drives, nothing validates it, and a
+ * wrong variant drives the wrong joint -- which on an assembled robot means
+ * legs folding the wrong way against their stops. So the servo check only
+ * PINGS: it proves the SPI bus, the four chip selects and the driver boards
+ * are wired as declared, and moves nothing.
+ *
+ * Run it with the servo rail unpowered. Everything here works without it.
+ *
+ * ── Reading the result ────────────────────────────────────────────────────
+ *
+ *   PASS   the hardware answered as the board files say it should
+ *   FAIL   it answered, but not with what was expected -- a wiring or config
+ *          mismatch, and the line says which
+ *   SKIP   could not be tested here (a subsystem is off, or needs your eyes)
+ *   LOOK   nothing is wrong; the panel is showing you something to judge
+ *
+ * A FAIL is a fact. A SKIP is not a pass -- it means this command could not
+ * answer the question and something else has to.
+ */
+
+#include "mpx_selftest.h"
+
+#include <inttypes.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "argtable3/argtable3.h"
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
+#include "driver/ledc.h"
+#include "esp_console.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_partition.h"
+#include "esp_timer.h"
+#include "esp_vfs_fat.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "esp_board_device.h"
+#include "esp_board_periph.h"
+#include "periph_ledc.h"
+
+#include "claw_paths.h"
+
+#if CONFIG_MP4_ROBOT_ENABLE
+#include "mpx_robot.h"
+#endif
+#include "cap_display.h"
+
+static const char *TAG = "selftest";
+
+/* What the board files claim is on the I2C bus. Both are on IO1/IO2 per
+ * schematic sheets 2 and 3. The ES7210's 0x41 is the 7-bit form of the 0x82
+ * write address the codec driver is configured with. */
+#define SELFTEST_I2C_BMI270   0x68
+#define SELFTEST_I2C_ES7210   0x41
+
+#define SELFTEST_BTN_BOOT     0
+#define SELFTEST_BTN_WAKE     21
+
+/* Gravity should read 1.0 g on a still robot. A tolerance this wide passes a
+ * sensor that is merely uncalibrated and fails one that is misconfigured --
+ * a wrong full-scale range is off by a factor of two or more, not by 15%. */
+#define SELFTEST_G_TOLERANCE  0.15f
+
+static int s_pass, s_fail, s_skip;
+
+/* ── Result reporting ──────────────────────────────────────────────────────
+ *
+ * printf, not ESP_LOGI: this is a report a person reads on a serial monitor,
+ * and log level, colour and timestamps get in the way of a results table. */
+
+static void r_pass(const char *what, const char *detail)
+{
+    s_pass++;
+    printf("  PASS  %-22s %s\n", what, detail ? detail : "");
+}
+
+static void r_fail(const char *what, const char *detail)
+{
+    s_fail++;
+    printf("  FAIL  %-22s %s\n", what, detail ? detail : "");
+}
+
+static void r_skip(const char *what, const char *why)
+{
+    s_skip++;
+    printf("  SKIP  %-22s %s\n", what, why ? why : "");
+}
+
+static void r_look(const char *what, const char *detail)
+{
+    printf("  LOOK  %-22s %s\n", what, detail ? detail : "");
+}
+
+static void section(const char *name)
+{
+    printf("\n%s\n", name);
+}
+
+/* ── System ────────────────────────────────────────────────────────────────
+ *
+ * Cheap, and it catches the most embarrassing failure mode: a board flashed
+ * with firmware but not with its data partitions, which then fails later in
+ * ways that look like bugs. */
+
+static void test_system(void)
+{
+    section("System");
+
+    size_t psram = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    char detail[96];
+
+    if (psram >= 4u * 1024 * 1024) {
+        snprintf(detail, sizeof(detail), "%u MB total, %u KB free",
+                 (unsigned)(psram / (1024 * 1024)), (unsigned)(psram_free / 1024));
+        r_pass("PSRAM", detail);
+    } else {
+        snprintf(detail, sizeof(detail), "expected 8 MB, found %u KB -- octal PSRAM not configured?",
+                 (unsigned)(psram / 1024));
+        r_fail("PSRAM", detail);
+    }
+
+    snprintf(detail, sizeof(detail), "%u KB free", (unsigned)(internal_free / 1024));
+    r_pass("Internal RAM", detail);
+
+    /* The partitions the firmware cannot work without. */
+    static const char *const parts[] = { "system", "storage", "model" };
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+        const esp_partition_t *p = esp_partition_find_first(
+            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, parts[i]);
+        char label[32];
+        snprintf(label, sizeof(label), "Partition '%s'", parts[i]);
+        if (p) {
+            snprintf(detail, sizeof(detail), "at 0x%06" PRIX32 ", %u KB",
+                     (uint32_t)p->address, (unsigned)(p->size / 1024));
+            r_pass(label, detail);
+        } else {
+            r_fail(label, "not in the partition table");
+        }
+    }
+
+    /* Mounted, not merely present. */
+    const char *roots[2] = { claw_paths_get(CLAW_PATH_SYSTEM), claw_paths_get(CLAW_PATH_DATA) };
+    const char *names[2] = { "SYSTEM mount", "DATA mount" };
+    for (int i = 0; i < 2; i++) {
+        uint64_t total = 0, freeb = 0;
+        if (!roots[i]) {
+            r_fail(names[i], "claw_paths has no root for it");
+            continue;
+        }
+        if (esp_vfs_fat_info(roots[i], &total, &freeb) == ESP_OK) {
+            snprintf(detail, sizeof(detail), "%s  %u KB free of %u KB",
+                     roots[i], (unsigned)(freeb / 1024), (unsigned)(total / 1024));
+            r_pass(names[i], detail);
+        } else {
+            r_fail(names[i], roots[i]);
+        }
+    }
+}
+
+/* ── I2C ───────────────────────────────────────────────────────────────────
+ *
+ * The single most informative test on the board. Probing every address tells
+ * you at once whether SDA/SCL are on the pins the board file claims, whether
+ * the pull-ups are doing their job, and whether each chip is strapped to the
+ * address that was read off the schematic. */
+
+static void test_i2c(void)
+{
+    section("I2C bus (SDA 1, SCL 2)");
+
+    i2c_master_bus_handle_t bus = NULL;
+    if (esp_board_periph_ref_handle("i2c_master", (void **)&bus) != ESP_OK || !bus) {
+        r_skip("I2C bus", "board peripheral 'i2c_master' not available");
+        return;
+    }
+
+    bool found_bmi = false, found_es = false;
+    int others = 0;
+    char extra[96] = {0};
+    size_t at = 0;
+
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        if (i2c_master_probe(bus, addr, 50) != ESP_OK) {
+            continue;
+        }
+        if (addr == SELFTEST_I2C_BMI270) {
+            found_bmi = true;
+        } else if (addr == SELFTEST_I2C_ES7210) {
+            found_es = true;
+        } else if (at + 6 < sizeof(extra)) {
+            at += (size_t)snprintf(extra + at, sizeof(extra) - at, "%s0x%02X", others ? " " : "", addr);
+            others++;
+        }
+    }
+
+    if (found_bmi) {
+        r_pass("BMI270 @ 0x68", "IMU answered on the primary address");
+    } else {
+        /* Worth naming, because this is the reading I got wrong twice. */
+        bool at69 = (i2c_master_probe(bus, 0x69, 50) == ESP_OK);
+        r_fail("BMI270 @ 0x68", at69
+               ? "silent, but something answered at 0x69 -- SDO is strapped high, "
+                 "set i2c_addr: 0x69 in board_devices.yaml"
+               : "no answer -- check I2C wiring, pull-ups, and that the IMU is powered");
+    }
+
+    if (found_es) {
+        r_pass("ES7210 @ 0x41", "audio ADC answered");
+    } else {
+        r_fail("ES7210 @ 0x41", "no answer -- microphones will not work");
+    }
+
+    if (others > 0) {
+        r_look("Other devices", extra);
+    }
+    esp_board_periph_unref_handle("i2c_master");
+}
+
+/* ── IMU ───────────────────────────────────────────────────────────────────
+ *
+ * Answering on I2C only proves the chip is there. This proves it is
+ * configured: on a still robot the accelerometer must measure 1 g, and it can
+ * only do that if the full-scale range matches what the driver believes. */
+
+static void test_imu(void)
+{
+#if CONFIG_MP4_ROBOT_ENABLE
+    section("IMU");
+
+    if (!mpx_robot_ready()) {
+        r_skip("IMU", "mpx_robot did not start -- see the boot log");
+        return;
+    }
+
+    mpx_robot_imu_t s = {0};
+    mpx_robot_imu_read(&s);
+
+    float mag = sqrtf(s.ax * s.ax + s.ay * s.ay + s.az * s.az);
+    float spin = fabsf(s.gx) + fabsf(s.gy) + fabsf(s.gz);
+    char detail[128];
+
+    snprintf(detail, sizeof(detail), "a=(%+.2f %+.2f %+.2f) g  |a|=%.2f", s.ax, s.ay, s.az, mag);
+    if (mag > 0.01f && fabsf(mag - 1.0f) <= SELFTEST_G_TOLERANCE) {
+        r_pass("Accelerometer", detail);
+    } else if (mag <= 0.01f) {
+        r_fail("Accelerometer", "reads zero on every axis -- not sampling");
+    } else {
+        r_fail("Accelerometer", detail);
+        printf("        |a| should be 1.00 g at rest. Far off usually means the "
+               "full-scale range does not match the driver.\n");
+    }
+
+    snprintf(detail, sizeof(detail), "g=(%+.1f %+.1f %+.1f) dps", s.gx, s.gy, s.gz);
+    if (spin < 15.0f) {
+        r_pass("Gyroscope", detail);
+    } else {
+        r_fail("Gyroscope", detail);
+        printf("        Expected near zero on a stationary robot. Hold it still and retry.\n");
+    }
+
+    /* Which axis holds gravity tells you how the sensor is mounted, which is
+     * the thing the gait's tilt correction depends on. Nobody can check that
+     * from a schematic. */
+    const char *axis = fabsf(s.az) > 0.7f ? "Z" : (fabsf(s.ay) > 0.7f ? "Y" : (fabsf(s.ax) > 0.7f ? "X" : "none"));
+    snprintf(detail, sizeof(detail), "gravity is on %s -- expect Z on a level robot", axis);
+    r_look("Orientation", detail);
+#else
+    r_skip("IMU", "MP4_ROBOT_ENABLE is off");
+#endif
+}
+
+/* ── Servo bus ─────────────────────────────────────────────────────────────
+ *
+ * Read-only. Ping every servo id and report which answered, grouped by the
+ * driver board that owns it, so a dead chip select shows up as a whole board
+ * of three going quiet rather than as scattered failures. */
+
+static void test_servo(void)
+{
+#if CONFIG_MP4_ROBOT_ENABLE
+    section("Servo bus (SPI3: MOSI 6, CLK 16, MISO 17)");
+
+    if (!mpx_robot_ready()) {
+        r_skip("Servo bus", "mpx_robot did not start -- see the boot log");
+        return;
+    }
+
+    static const struct { const char *conn; int cs; int first; } boards[4] = {
+        { "CN3", 15, 1 }, { "CN4", 7, 4 }, { "CN5", 4, 7 }, { "CN6", 5, 10 },
+    };
+    int total = 0;
+
+    for (int b = 0; b < 4; b++) {
+        char label[32], detail[96];
+        int alive = 0;
+        size_t at = 0;
+
+        detail[0] = '\0';
+        for (int i = 0; i < 3; i++) {
+            int id = boards[b].first + i;
+            if (mpx_robot_ping_servo(id) > 0) {
+                alive++;
+                total++;
+                at += (size_t)snprintf(detail + at, sizeof(detail) - at, "%s%d", at ? " " : "", id);
+            }
+        }
+        snprintf(label, sizeof(label), "%s (CS GPIO %d)", boards[b].conn, boards[b].cs);
+        if (alive == 3) {
+            r_pass(label, "servos ready");
+        } else if (alive > 0) {
+            char part[128];
+            snprintf(part, sizeof(part), "only %d of 3 answered (ids %s)", alive, detail);
+            r_fail(label, part);
+        } else {
+            r_fail(label, "no servo answered");
+        }
+    }
+
+    if (total == 0) {
+        printf("\n  Nothing answered at all. If the servo rail is unpowered this is\n"
+               "  EXPECTED and not a fault -- it is the safe way to run this test.\n"
+               "  Power the servos and rerun to check the bus properly.\n");
+    } else if (total < 12) {
+        printf("\n  A whole connector silent usually means its chip select, not its\n"
+               "  servos. All four share MOSI, CLK and MISO, so if one board answers\n"
+               "  the bus itself is fine.\n");
+    }
+#else
+    r_skip("Servo bus", "MP4_ROBOT_ENABLE is off");
+#endif
+}
+
+/* ── Backlight ─────────────────────────────────────────────────────────────
+ *
+ * The board declares output_invert because the backlight FET is P-channel
+ * (Q2, SI2301). If that is wrong the panel is brightest at 0%, which this
+ * ramp makes obvious in three seconds. */
+
+static void test_backlight(void)
+{
+    section("Backlight (LEDC on GPIO 42)");
+
+    void *handle = NULL;
+    if (esp_board_device_get_handle("lcd_brightness", &handle) != ESP_OK || !handle) {
+        r_skip("Backlight", "device 'lcd_brightness' not available");
+        return;
+    }
+    periph_ledc_handle_t *ledc = (periph_ledc_handle_t *)handle;
+    const uint32_t max = (1u << LEDC_TIMER_10_BIT) - 1u;
+
+    printf("        ramping 0 -> 100 -> 80 %%...\n");
+    for (int pct = 0; pct <= 100; pct += 5) {
+        ledc_set_duty(ledc->speed_mode, ledc->channel, max * (uint32_t)pct / 100u);
+        ledc_update_duty(ledc->speed_mode, ledc->channel);
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+    ledc_set_duty(ledc->speed_mode, ledc->channel, max * 80u / 100u);
+    ledc_update_duty(ledc->speed_mode, ledc->channel);
+
+    r_look("Backlight", "did it go dark to bright? if it went bright to dark, "
+                        "output_invert is wrong");
+}
+
+/* ── Display ───────────────────────────────────────────────────────────────
+ *
+ * The three values in board_devices.yaml that a schematic cannot settle --
+ * mirror_x, swap_xy and invert_color -- are all decided by looking at the
+ * panel. So this draws something whose correct appearance is unambiguous. */
+
+static void test_display(uint32_t hold_ms)
+{
+    section("Display (ST7789, SPI2)");
+
+    esp_err_t err = cap_display_show_test_pattern(hold_ms);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        r_skip("Display", "no panel on this board");
+        return;
+    }
+    if (err != ESP_OK) {
+        r_fail("Display", esp_err_to_name(err));
+        return;
+    }
+
+    r_look("Test pattern", "check all four points below");
+    printf("        1. corner labels read TL TR BL BR, in those corners\n");
+    printf("           wrong corners  -> mirror_x / mirror_y\n");
+    printf("           rotated 90 deg -> swap_xy\n");
+    printf("        2. the bars are RED, GREEN, BLUE in that order\n");
+    printf("           inverted colours -> invert_color\n");
+    printf("        3. no tearing, noise or wrong-coloured pixels\n");
+    printf("           speckle -> lower pclk_hz from 80 MHz to 40 MHz\n");
+    printf("           garbage -> try a different spi_mode\n");
+    printf("        4. the frame touches all four edges with no offset band\n");
+}
+
+/* ── Buttons ───────────────────────────────────────────────────────────────
+ *
+ * Both are to ground, so a press reads low. Sampling rather than asking the
+ * board manager, because nothing in the firmware reads these yet. */
+
+static void test_buttons(uint32_t window_ms)
+{
+    section("Buttons");
+
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << SELFTEST_BTN_BOOT) | (1ULL << SELFTEST_BTN_WAKE),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&cfg) != ESP_OK) {
+        r_skip("Buttons", "could not configure GPIO 0 and 21");
+        return;
+    }
+
+    printf("        press BOOT and WAKE now (%u s)...\n", (unsigned)(window_ms / 1000));
+    bool boot_seen = false, wake_seen = false;
+    int64_t deadline = esp_timer_get_time() + (int64_t)window_ms * 1000;
+    while (esp_timer_get_time() < deadline && !(boot_seen && wake_seen)) {
+        if (gpio_get_level(SELFTEST_BTN_BOOT) == 0) {
+            boot_seen = true;
+        }
+        if (gpio_get_level(SELFTEST_BTN_WAKE) == 0) {
+            wake_seen = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    boot_seen ? r_pass("BOOT (GPIO 0)", "press detected")
+              : r_skip("BOOT (GPIO 0)", "no press seen -- untested, not failed");
+    wake_seen ? r_pass("WAKE (GPIO 21)", "press detected")
+              : r_skip("WAKE (GPIO 21)", "no press seen -- untested, not failed");
+}
+
+/* ── The command ───────────────────────────────────────────────────────── */
+
+static struct {
+    struct arg_lit *system_;
+    struct arg_lit *i2c;
+    struct arg_lit *imu;
+    struct arg_lit *servo;
+    struct arg_lit *display;
+    struct arg_lit *backlight;
+    struct arg_lit *buttons;
+    struct arg_int *hold;
+    struct arg_end *end;
+} s_args;
+
+static int selftest_cmd(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&s_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, s_args.end, argv[0]);
+        return 1;
+    }
+
+    bool any = s_args.system_->count || s_args.i2c->count || s_args.imu->count ||
+               s_args.servo->count || s_args.display->count ||
+               s_args.backlight->count || s_args.buttons->count;
+    bool all = !any;
+    uint32_t hold = s_args.hold->count ? (uint32_t)s_args.hold->ival[0] * 1000u : 10000u;
+
+    s_pass = s_fail = s_skip = 0;
+    printf("\nMP4 ESP32 CORE self-test\n");
+    printf("Servo rail should be UNPOWERED for a first run.\n");
+
+    if (all || s_args.system_->count)   { test_system(); }
+    if (all || s_args.i2c->count)       { test_i2c(); }
+    if (all || s_args.imu->count)       { test_imu(); }
+    if (all || s_args.servo->count)     { test_servo(); }
+    if (all || s_args.backlight->count) { test_backlight(); }
+    if (all || s_args.display->count)   { test_display(hold); }
+    if (all || s_args.buttons->count)   { test_buttons(8000); }
+
+    printf("\n%d passed, %d failed, %d skipped\n", s_pass, s_fail, s_skip);
+    if (s_fail == 0) {
+        printf("No mismatches found. LOOK items still need your eyes.\n\n");
+    } else {
+        printf("Each FAIL names what was expected -- board files, wiring, or both.\n\n");
+    }
+    return s_fail == 0 ? 0 : 1;
+}
+
+void register_selftest_command(void)
+{
+    s_args.system_   = arg_lit0(NULL, "system",    "RAM, partitions and mounts");
+    s_args.i2c       = arg_lit0(NULL, "i2c",       "Probe the I2C bus for the IMU and audio ADC");
+    s_args.imu       = arg_lit0(NULL, "imu",       "Read the BMI270 and check it measures 1 g");
+    s_args.servo     = arg_lit0(NULL, "servo",     "Ping the servo boards (does NOT move anything)");
+    s_args.display   = arg_lit0(NULL, "display",   "Show a test pattern for orientation and colour");
+    s_args.backlight = arg_lit0(NULL, "backlight", "Ramp the backlight to check output_invert");
+    s_args.buttons   = arg_lit0(NULL, "buttons",   "Wait for BOOT and WAKE presses");
+    s_args.hold      = arg_int0(NULL, "hold", "<s>", "Seconds to hold the test pattern (default 10)");
+    s_args.end       = arg_end(8);
+
+    const esp_console_cmd_t cmd = {
+        .command = "selftest",
+        .help = "Check the board against what the firmware believes is wired.\n"
+                "With no options every check runs. Nothing here moves a servo.\n"
+                "Examples:\n"
+                "  selftest                 everything\n"
+                "  selftest --i2c --imu     just the sensors\n"
+                "  selftest --display --hold 30\n",
+        .func = selftest_cmd,
+        .argtable = &s_args,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    ESP_LOGI(TAG, "'selftest' console command registered");
+}

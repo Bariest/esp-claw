@@ -4,6 +4,7 @@
  */
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +27,15 @@ esp_err_t cap_display_face_start(void);
  *  In AP mode the panel is the only thing that can tell someone which
  *  network to join, since they have not joined it yet. */
 void cap_display_face_set_network(bool sta_connected, const char *ap_ssid, const char *ip);
+
+/** @brief Draw a bring-up test pattern, hold it, then restore the face.
+ *
+ *  Corner labels, RGB bars and an edge frame -- enough to judge mirror_x,
+ *  swap_xy, invert_color and any panel offset by eye, which is the only way
+ *  those can be checked. Blocks for @p hold_ms.
+ *
+ *  @return ESP_ERR_NOT_SUPPORTED when the board has no panel. */
+esp_err_t cap_display_show_test_pattern(uint32_t hold_ms);
 #ifdef __cplusplus
 }
 #endif

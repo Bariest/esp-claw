@@ -38,6 +38,9 @@
 
 #include "display_service.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 static const char *TAG = "cap_display";
 
 #define CAP_DISPLAY_TEXT_MAX 128
@@ -144,6 +147,109 @@ static esp_err_t paint_text(const char *text)
     }
     display_service_unlock();
     return err;
+}
+
+/* ── Bring-up test pattern ─────────────────────────────────────────────────
+ *
+ * Three values in board_devices.yaml cannot be settled from a schematic --
+ * mirror_x, swap_xy and invert_color describe how a panel is physically
+ * mounted, not how it is wired. The only way to check them is to draw
+ * something whose correct appearance is unambiguous and look at it.
+ *
+ * Hence corner labels rather than a pretty pattern: "TL" in the wrong corner
+ * names the wrong flag directly. The border frame catches a row/column offset,
+ * which otherwise hides as a thin band of noise at one edge.
+ */
+
+esp_err_t cap_display_show_test_pattern(uint32_t hold_ms)
+{
+    static const struct { const char *text; lv_align_t align; int dx, dy; } corners[] = {
+        { "TL", LV_ALIGN_TOP_LEFT,      6,   6 },
+        { "TR", LV_ALIGN_TOP_RIGHT,    -6,   6 },
+        { "BL", LV_ALIGN_BOTTOM_LEFT,   6,  -6 },
+        { "BR", LV_ALIGN_BOTTOM_RIGHT, -6,  -6 },
+    };
+    static const uint32_t bars[3] = { 0xFF0000, 0x00FF00, 0x0000FF };
+
+    esp_err_t err = ensure_session();
+    lv_obj_t *screen;
+
+    if (err != ESP_OK) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (display_service_lock() != ESP_OK) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    screen = lv_obj_create(NULL);
+    if (!screen) {
+        display_service_unlock();
+        return ESP_ERR_NO_MEM;
+    }
+    lv_obj_set_style_bg_color(screen, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(screen, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* A frame on the outermost pixels. If the panel is offset, one edge of
+     * this is missing or doubled. */
+    lv_obj_set_style_border_color(screen, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_border_width(screen, 2, LV_PART_MAIN);
+
+    for (size_t i = 0; i < sizeof(corners) / sizeof(corners[0]); i++) {
+        lv_obj_t *label = lv_label_create(screen);
+        if (!label) {
+            continue;
+        }
+        lv_label_set_text(label, corners[i].text);
+        lv_obj_set_style_text_color(label, lv_color_white(), LV_PART_MAIN);
+        lv_obj_align(label, corners[i].align, corners[i].dx, corners[i].dy);
+    }
+
+    /* Red, green, blue, left to right. Any other order or hue means the
+     * colour format or invert_color is wrong. */
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *bar = lv_obj_create(screen);
+        if (!bar) {
+            continue;
+        }
+        lv_obj_set_size(bar, 60, 40);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(bars[i]), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_width(bar, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(bar, 0, LV_PART_MAIN);
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_align(bar, LV_ALIGN_CENTER, (i - 1) * 66, 34);
+    }
+
+    {
+        lv_obj_t *size_label = lv_label_create(screen);
+        if (size_label) {
+            lv_label_set_text_fmt(size_label, "%d x %d",
+                                  (int)lv_display_get_horizontal_resolution(NULL),
+                                  (int)lv_display_get_vertical_resolution(NULL));
+            lv_obj_set_style_text_color(size_label, lv_color_hex(0xFFE631), LV_PART_MAIN);
+            lv_obj_align(size_label, LV_ALIGN_CENTER, 0, -30);
+        }
+    }
+
+    err = display_service_session_load_screen_locked(s_session, screen);
+    display_service_unlock();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(hold_ms));
+
+    /* Put the face back and drop the pattern. Deleting the screen only after
+     * another one is loaded, because deleting the active screen is what LVGL
+     * documents as undefined. */
+    if (display_service_lock() == ESP_OK) {
+        (void)show_face_locked();
+        lv_obj_delete(screen);
+        display_service_unlock();
+    }
+    return ESP_OK;
 }
 
 /* ── Boot ──────────────────────────────────────────────────────────────── */

@@ -39,6 +39,7 @@
 #include "cap_mpx_skill.h"
 #if CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
 #include "cap_display.h"
+#include "mpx_selftest.h"
 #endif
 #endif
 
@@ -697,6 +698,7 @@ void app_main(void)
 #endif
 
     register_wifi_command();
+    register_selftest_command();
 
 #if APP_ENABLE_MEM_LOG
     /* Start memory monitor: print internal free, min free, PSRAM free every 20s */
