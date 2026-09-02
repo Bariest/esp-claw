@@ -38,9 +38,13 @@
 #include "cap_robot.h"
 #include "cap_mpx_skill.h"
 #include "mpx_selftest.h"
-#if CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
+/* cap_display is built for every MP4_ROBOT_ENABLE configuration, panel or no
+ * panel -- see main/idf_component.yml. Do NOT put this include behind
+ * CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT: the face calls below are guarded
+ * by MP4_ROBOT_ENABLE alone, and a narrower guard on the declaration is how
+ * you get an implicit-declaration error on a display-less board.
+ * cap_display_face_start() already treats "no panel" as success. */
 #include "cap_display.h"
-#endif
 #endif
 
 #define APP_ENABLE_MEM_LOG        (0)
