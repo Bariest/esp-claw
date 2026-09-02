@@ -204,13 +204,21 @@ sink, so this should not recur. If you change a console setting, change it in
 
 ## Editing sdkconfig.defaults.board does nothing on its own
 
-`idf.py bmgr <board>` deletes `sdkconfig` **only when the board changes**. On an
+`idf.py bmgr` deletes `sdkconfig` **only when the board changes**. On an
 unchanged board it prints `Board unchanged, preserving sdkconfig` and your edit
 never reaches the build -- the old value is already in `sdkconfig` and wins.
 
-    idf.py bmgr generic_esp32s3
+    idf.py bmgr -c ./boards -b generic_esp32s3
     del sdkconfig            # rm sdkconfig on POSIX -- this is the step people skip
     idf.py build
+
+**`-c ./boards` is not optional.** Without it bmgr scans only
+`managed_components/` and `components/`, finds the thirteen Espressif dev
+boards and none of ours, and fails with `Board "generic_esp32s3" not found`
+followed by a list that looks authoritative and is not. Passing the board as a
+positional argument (`idf.py bmgr generic_esp32s3`) is also rejected as of
+esp-bmgr-assist 0.8.2 -- it prints a usage hint and exits **0** having done
+nothing, which reads like success.
 
 This is what made the esp-sr model options appear to be ignored for an
 afternoon. Check `components/gen_bmgr_codes/board_manager.defaults` if you want
