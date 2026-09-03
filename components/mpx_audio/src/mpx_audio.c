@@ -136,6 +136,19 @@ esp_err_t mpx_audio_init(void)
     ESP_LOGI(TAG, "microphone %s, speaker %s",
              mpx_audio_have_mic() ? "ready" : "absent",
              mpx_audio_have_speaker() ? "ready" : "absent");
+
+#if !CONFIG_CODEC_DUMMY_SUPPORT
+    if (!mpx_audio_have_speaker()) {
+        /* Much the most likely reason, and invisible otherwise: an amplifier
+         * with no control interface is declared `chip: internal`, and that is
+         * backed by the "dummy" codec. Without CONFIG_CODEC_DUMMY_SUPPORT the
+         * board manager cannot create the device, says nothing about it, and
+         * the only trace is the word "absent" above. */
+        ESP_LOGW(TAG, "audio_dac missing and CONFIG_CODEC_DUMMY_SUPPORT is off");
+        ESP_LOGW(TAG, "a `chip: internal` amplifier needs it -- set it in the "
+                      "board's sdkconfig.defaults.board");
+    }
+#endif
     return ESP_OK;
 }
 

@@ -34,8 +34,25 @@ CONFIG_MP4_ROBOT_SERVO_ENABLE=n
 # and nothing uses it yet.
 CONFIG_MP4_VOICE_ENABLE=n
 
+# ---- Audio codecs ----------------------------------------------------
+#
+# CODEC_DUMMY_SUPPORT is what backs `chip: internal` on audio_dac. The
+# MAX98357A has no control interface -- there is nothing to drive but I2S --
+# so the board manager needs the "dummy" codec compiled in to represent it.
+#
+# Without this the device simply is not created: the board still boots, the
+# ES7210 still records, and audio_dac is absent with no error anywhere. The
+# only symptom is `audio info` reporting "speaker : absent", which reads like
+# a hardware fault rather than a missing Kconfig symbol.
+CONFIG_CODEC_DUMMY_SUPPORT=y
+CONFIG_CODEC_ES7210_SUPPORT=y
+
+# esp_codec_dev takes an i2c_master_bus_handle_t rather than the legacy port.
+CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
+
 # Display is present.
 CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=y
+CONFIG_ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT=y
 
 # Camera connector is unpopulated for voice work.
 CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT=n
