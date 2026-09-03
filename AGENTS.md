@@ -178,6 +178,13 @@ DATA may live on flash or an SD card depending on the board.
   file inside `managed_components/`, so it reads like a broken dependency
   rather than a missing board file. Copy `boards/mp4_esp32_core/setup_device.c`
   and change the panel constructor.
+- **After ADDING a file to a board folder, run `idf.py reconfigure`.** The
+  generated `components/gen_bmgr_codes/CMakeLists.txt` pulls the board in with
+  `SRC_DIRS "../../boards/<board>"`, and CMake expands that glob at configure
+  time only. A plain `idf.py build` does not re-run CMake unless a
+  `CMakeLists.txt` changed, so a newly added `.c` file is invisible and the
+  link fails with exactly the same error as if the file did not exist. Editing
+  a file that was already there is fine; adding one is not.
 
 ## This board, specifically
 
