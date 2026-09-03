@@ -19,8 +19,18 @@ static const char *TAG = "voice_cmd";
 static void voice_usage(void)
 {
     printf("\n"
-           "  voice loopback [secs]   microphone -> Opus -> speaker, no network\n"
-           "  voice info              codec state and frame sizes\n"
+           "  voice loopback [secs]        microphone -> Opus -> speaker, no network\n"
+           "  voice connect <url> [token]  open a xiaozhi websocket\n"
+           "  voice disconnect             close it\n"
+           "  voice send <json>            send one raw control message\n"
+           "  voice info                   link state, session, frame sizes\n"
+           "\n"
+           "  voice connect ws://192.168.1.50:8000/xiaozhi/v1/\n"
+           "\n"
+           "Connect waits for the server's hello, not just for the socket to\n"
+           "open. A socket that opens and then says nothing is the usual\n"
+           "failure -- wrong path, wrong token, wrong protocol version -- and\n"
+           "reporting success on TCP alone would hide all of them.\n"
            "\n"
            "Loopback is the Phase 2 gate. Hearing yourself proves the encoder,\n"
            "the decoder and the frame arithmetic without a server existing --\n"
@@ -44,7 +54,43 @@ static int voice_cmd(int argc, char **argv)
         return 0;
     }
 
+    if (strcmp(argv[1], "connect") == 0) {
+        if (argc < 3) {
+            printf("  usage: voice connect ws://<host>:<port>/xiaozhi/v1/ [token]\n");
+            return 1;
+        }
+        const esp_err_t err = mpx_voice_connect(argv[2], (argc >= 4) ? argv[3] : NULL);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "connect failed: %s", esp_err_to_name(err));
+            return 1;
+        }
+        printf("  connected, session %s\n", mpx_voice_session_id());
+        return 0;
+    }
+
+    if (strcmp(argv[1], "disconnect") == 0) {
+        mpx_voice_disconnect();
+        return 0;
+    }
+
+    if (strcmp(argv[1], "send") == 0) {
+        if (argc < 3) {
+            printf("  usage: voice send <json>\n");
+            return 1;
+        }
+        const esp_err_t err = mpx_voice_send_json(argv[2]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "send failed: %s", esp_err_to_name(err));
+            return 1;
+        }
+        return 0;
+    }
+
     if (strcmp(argv[1], "info") == 0) {
+        printf("  link         : %s\n", mpx_voice_state_name());
+        printf("  session      : %s\n",
+               mpx_voice_session_id()[0] ? mpx_voice_session_id() : "(none)");
+        printf("  downlink     : %u Hz\n", (unsigned)mpx_voice_downlink_rate());
         printf("  codec        : %s\n", mpx_voice_codec_running() ? "running" : "stopped");
         printf("  uplink       : %d Hz, %d frames per %d ms\n",
                MPX_VOICE_UPLINK_RATE, MPX_VOICE_UPLINK_FRAME, MPX_VOICE_FRAME_MS);

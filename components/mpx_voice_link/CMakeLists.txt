@@ -3,12 +3,16 @@
 idf_component_register(
     SRCS
         "src/mpx_voice_codec.cc"
+        "src/mpx_voice_ws.c"
         "src/mpx_voice_cmd.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
         mpx_audio
         console
+        json
+        esp_websocket_client
+        esp_wifi
         # 78__esp-opus is NOT redundant.
         #
         # 78/esp-opus-encoder keeps 78/esp-opus in its PRIVATE requirements,
