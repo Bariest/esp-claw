@@ -60,6 +60,40 @@ static const char *TAG = "app";
 static app_config_t *s_config;
 static app_claw_config_t *s_claw_config;
 
+/* What the Wi-Fi endpoints under /v1/wifi/ still need after boot.
+ *
+ * s_config is freed at the end of app_main -- deliberately, because the full
+ * app_config_t is about 6.5 KB and holds the LLM API key, the Telegram bot
+ * token and every other secret. Keeping it resident just so the Wi-Fi
+ * endpoints can read four fields would leave all of that in RAM for the life
+ * of the device, which is a poor trade for a struct that is written once at
+ * boot.
+ *
+ * So the Wi-Fi services keep their own copy of exactly what they need and
+ * nothing else. The STA password is deliberately NOT here: /v1/wifi/connect
+ * receives it as an argument, and no other caller needs it. Anything that has
+ * to change what is stored loads a fresh app_config_t from NVS, edits it,
+ * saves it and frees it -- see main_wifi_store_credentials(). */
+typedef struct {
+    char sta_ssid[APP_CONFIG_STR_LEN];
+    char ap_ssid[APP_CONFIG_STR_LEN];
+    char ap_password[APP_CONFIG_STR_LEN];
+    char ap_behavior[16];
+} main_wifi_state_t;
+
+static main_wifi_state_t s_wifi;
+
+static void main_wifi_state_capture(const app_config_t *config)
+{
+    if (!config) {
+        return;
+    }
+    strlcpy(s_wifi.sta_ssid, config->wifi_ssid, sizeof(s_wifi.sta_ssid));
+    strlcpy(s_wifi.ap_ssid, config->ap_ssid, sizeof(s_wifi.ap_ssid));
+    strlcpy(s_wifi.ap_password, config->ap_password, sizeof(s_wifi.ap_password));
+    strlcpy(s_wifi.ap_behavior, config->ap_behavior, sizeof(s_wifi.ap_behavior));
+}
+
 static esp_err_t app_allocate_runtime_state(void)
 {
     if (!s_config) {
@@ -244,8 +278,8 @@ static esp_err_t main_get_wifi_status(http_server_wifi_status_t *status)
      * not expose it -- but only while the radio is actually carrying it.
      * Reporting a name that /v1/wifi/disconnect just took off the air would
      * have the setup screen showing a network the robot is not on. */
-    status->sta_ssid = (s_config && (wifi_status.sta_configured || wifi_status.sta_connected))
-                       ? s_config->wifi_ssid : "";
+    status->sta_ssid = (wifi_status.sta_configured || wifi_status.sta_connected)
+                       ? s_wifi.sta_ssid : "";
     return ESP_OK;
 }
 
@@ -308,31 +342,53 @@ static esp_err_t main_apply_ap_ip(void)
  */
 static esp_err_t main_wifi_apply(const char *sta_ssid, const char *sta_password)
 {
-    ESP_RETURN_ON_FALSE(s_config, ESP_ERR_INVALID_STATE, TAG, "config not loaded");
-
     /* The AP half is passed every time because apply_sta_config replaces the
      * whole configuration: omitting it would silently rename the robot's own
      * access point back to the default while joining a network. */
     return wifi_manager_apply_sta_config(&(wifi_manager_config_t) {
         .sta_ssid = sta_ssid,
         .sta_password = sta_password,
-        .ap_ssid = s_config->ap_ssid[0] ? s_config->ap_ssid : NULL,
-        .ap_password = s_config->ap_password[0] ? s_config->ap_password : NULL,
-        .ap_behavior = s_config->ap_behavior,
+        .ap_ssid = s_wifi.ap_ssid[0] ? s_wifi.ap_ssid : NULL,
+        .ap_password = s_wifi.ap_password[0] ? s_wifi.ap_password : NULL,
+        .ap_behavior = s_wifi.ap_behavior,
     });
+}
+
+/* Persist a change to the stored STA credentials.
+ *
+ * Loads the whole config from NVS, edits the two fields, saves, frees. The
+ * temporary is about 6.5 KB, which is why it is heap rather than stack -- the
+ * httpd task's stack is 8 KB and this runs on it. Passing NULL for ssid
+ * clears both fields, which is what /v1/wifi/forget wants. */
+static esp_err_t main_wifi_store_credentials(const char *ssid, const char *password)
+{
+    app_config_t *config = calloc(1, sizeof(*config));
+    ESP_RETURN_ON_FALSE(config, ESP_ERR_NO_MEM, TAG, "Out of memory for config");
+
+    esp_err_t err = app_config_load(config);
+    if (err == ESP_OK) {
+        strlcpy(config->wifi_ssid, ssid ? ssid : "", sizeof(config->wifi_ssid));
+        strlcpy(config->wifi_password, password ? password : "",
+                sizeof(config->wifi_password));
+        err = main_save_config(config);
+        if (err == ESP_OK) {
+            strlcpy(s_wifi.sta_ssid, config->wifi_ssid, sizeof(s_wifi.sta_ssid));
+        }
+    }
+
+    free(config);
+    return err;
 }
 
 static esp_err_t main_wifi_connect(const char *ssid, const char *password)
 {
-    ESP_RETURN_ON_FALSE(s_config, ESP_ERR_INVALID_STATE, TAG, "config not loaded");
     ESP_RETURN_ON_FALSE(ssid && ssid[0], ESP_ERR_INVALID_ARG, TAG, "ssid is empty");
 
-    strlcpy(s_config->wifi_ssid, ssid, sizeof(s_config->wifi_ssid));
-    strlcpy(s_config->wifi_password, password ? password : "", sizeof(s_config->wifi_password));
-    ESP_RETURN_ON_ERROR(main_save_config(s_config), TAG, "Failed to save Wi-Fi credentials");
+    ESP_RETURN_ON_ERROR(main_wifi_store_credentials(ssid, password), TAG,
+                        "Failed to save Wi-Fi credentials");
 
     ESP_LOGI(TAG, "Joining Wi-Fi network %s", ssid);
-    return main_wifi_apply(s_config->wifi_ssid, s_config->wifi_password);
+    return main_wifi_apply(ssid, password);
 }
 
 /* Drop the station link and stay dropped.
@@ -350,13 +406,11 @@ static esp_err_t main_wifi_disconnect(void)
 
 static esp_err_t main_wifi_forget(void)
 {
-    ESP_RETURN_ON_FALSE(s_config, ESP_ERR_INVALID_STATE, TAG, "config not loaded");
-
     ESP_LOGW(TAG, "Forgetting Wi-Fi credentials for %s",
-             s_config->wifi_ssid[0] ? s_config->wifi_ssid : "(none)");
-    s_config->wifi_ssid[0] = '\0';
-    s_config->wifi_password[0] = '\0';
-    ESP_RETURN_ON_ERROR(main_save_config(s_config), TAG, "Failed to clear Wi-Fi credentials");
+             s_wifi.sta_ssid[0] ? s_wifi.sta_ssid : "(none)");
+
+    ESP_RETURN_ON_ERROR(main_wifi_store_credentials(NULL, NULL), TAG,
+                        "Failed to clear Wi-Fi credentials");
 
     return main_wifi_apply(NULL, NULL);
 }
@@ -574,6 +628,12 @@ void app_main(void)
     ESP_ERROR_CHECK(app_config_load(s_config));
     app_config_to_claw(s_config, s_claw_config);
     init_timezone(app_config_get_timezone(s_config)); // no need to check error
+
+    /* Take the Wi-Fi fields now, while the config is still in memory. Every
+     * request to the endpoints under /v1/wifi/ reads them from here after
+     * boot, because s_config itself is freed at the end of app_main. */
+    main_wifi_state_capture(s_config);
+
     /* Deliberately not ESP_ERROR_CHECK'd.
      *
      * This initialises every chip the selected board file declares. On the
@@ -800,5 +860,15 @@ void app_main(void)
     xTaskCreate(memory_monitor_task, "mem_mon", 4096, NULL, 1, NULL);
 #endif
 
+    /* s_config and s_claw_config are boot-time scaffolding: about 6.5 KB of
+     * strings, most of them secrets, that nothing needs once the subsystems
+     * they configured are running.
+     *
+     * Anything reached from an HTTP handler or a console command runs AFTER
+     * this point, so it must not hold a pointer into either of them. That is
+     * exactly how /v1/wifi/connect came to fail with "config not loaded" on
+     * every request: the endpoints worked from s_config, which by then was
+     * NULL. See main_wifi_state_capture() for the pattern to follow -- copy
+     * the few fields you need before the free, or reload from NVS on demand. */
     app_free_runtime_state();
 }
