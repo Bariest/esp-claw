@@ -107,7 +107,7 @@ menu "MP4 Robot"
         int "LVGL draw buffer height, in scan lines"
         depends on ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
         range 4 240
-        default 16
+        default 8
         help
             How many scan lines LVGL renders before handing them to the panel.
 
@@ -130,10 +130,15 @@ menu "MP4 Robot"
             while still showing whatever was drawn before memory ran out --
             so the screen looks fine and the log says otherwise.
 
-            16 lines is 10240 bytes, which fits comfortably and costs only
-            more flushes per frame. Raise it if the panel feels slow and
-            there is internal RAM to spare; lower it if allocation still
-            fails.
+            8 lines is 5120 bytes. 16 was the first attempt and was enough
+            until the WebSocket client turned up and took its own internal
+            buffers, at which point every flush started failing again -- so
+            the number is set by whatever else is running, not by the display.
+
+            Raise it if the panel feels slow and `heap` shows internal RAM to
+            spare; lower it if allocation still fails. If it fails even at 4,
+            the answer is not here: something else needs to stop using
+            internal RAM.
 
     config MP4_ROBOT_SERVO_ENABLE
         bool "Drive the SPI servo boards"

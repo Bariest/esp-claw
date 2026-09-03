@@ -17,6 +17,7 @@
 
 #include "cJSON.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_websocket_client.h"
@@ -120,6 +121,9 @@ static void voice_handle_hello(const cJSON *root)
     s_state = MPX_VOICE_READY;
     ESP_LOGI(TAG, "session ready: id=%s, downlink %" PRIu32 " Hz",
              s_session_id[0] ? s_session_id : "(none)", s_downlink_rate);
+    ESP_LOGI(TAG, "internal RAM after connect: %u free, %u largest",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     if (s_handshake) {
         xSemaphoreGive(s_handshake);
@@ -269,6 +273,14 @@ esp_err_t mpx_voice_connect(const char *url, const char *token)
     s_state = MPX_VOICE_CONNECTING;
     s_socket_opened = false;
     ESP_LOGI(TAG, "connecting to %s", url);
+
+    /* Internal RAM before and after, because the websocket client takes its
+     * buffers from it and this firmware has very little to give. When the
+     * panel starts logging ESP_ERR_NO_MEM the moment a socket opens, these
+     * two numbers are the evidence. */
+    ESP_LOGI(TAG, "internal RAM before connect: %u free, %u largest",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     const esp_err_t err = esp_websocket_client_start(s_client);
     if (err != ESP_OK) {
