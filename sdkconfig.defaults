@@ -128,3 +128,11 @@ CONFIG_PIX_CVT_YUV_TO_RGB565_SUPPORT=n
 CONFIG_PIX_CVT_YUV_TO_GRAY_SUPPORT=n
 CONFIG_PIX_CVT_YUV_TO_HSV_SUPPORT=n
 CONFIG_PIX_CVT_YUV_TO_YUV_SUPPORT=n
+
+# IDF's system event task runs every Wi-Fi and IP handler, including
+# wifi_manager's. The default 2304 bytes is sized for IDF's own handlers; this
+# firmware chains a log-capture vprintf hook onto every ESP_LOGx, which costs
+# a few hundred bytes on whichever task logs. Headroom, not a fix -- the fix
+# is that main.c does its network-status work on its own task (see
+# main_net_status_task), so nothing heavy runs here.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096

@@ -27,6 +27,7 @@
 #include "cmd_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #if CONFIG_APP_CLAW_CAP_IM_WECHAT
 #include "cap_im_wechat.h"
 #endif
@@ -132,21 +133,53 @@ static void log_wifi_startup_config(const app_config_t *config)
              config->ap_behavior[0] ? config->ap_behavior : "keep");
 }
 
-static void on_wifi_state_changed(bool connected, void *user_ctx)
-{
-    (void)user_ctx;
+/* ── Network status, off the event task ────────────────────────────────────
+ *
+ * wifi_manager invokes the state callback from IDF's system event task
+ * ("sys_evt"), whose stack is CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE -- 2304
+ * bytes by default, sized for IDF's own handlers and nothing more.
+ *
+ * Doing the work there overflowed it:
+ *
+ *   ***ERROR*** A stack overflow in task sys_evt has been detected.
+ *
+ * Three things add up. The log line goes through the capture hook in
+ * mpx_util/log_ring.cc, which formats into its own buffer before chaining to
+ * the UART sink. app_claw_set_network_status() updates system_ui. And
+ * cap_display_face_set_network() takes the display lock and writes an LVGL
+ * label -- LVGL is the expensive one, and on a board with no panel it also
+ * logs an error from inside the lock, which re-enters the same capture hook.
+ *
+ * Raising the event task stack alone would be treating the symptom. Blocking
+ * sys_evt is the real problem: every Wi-Fi and IP event in the system queues
+ * behind it, and on the MP4 board this contends for the display lock with the
+ * face's own animation timer. So the callback now does the cheap part only --
+ * read the status, copy the strings it needs, post -- and a worker task does
+ * the rest.
+ *
+ * The queue holds one item and is written with xQueueOverwrite, so the
+ * callback never blocks and never fails. Coalescing two transitions into the
+ * latest one is correct here: this drives a status line, not a state machine. */
+typedef struct {
+    bool connected;
+    bool ap_active;
+    char mode[16];
+    char ap_ssid[33];
+    char sta_ip[16];
+} main_net_status_t;
 
-    wifi_manager_status_t status = {0};
-    wifi_manager_get_status(&status);
-    const char *ap_ssid = status.ap_active ? status.ap_ssid : NULL;
+static QueueHandle_t s_net_status_queue;
+
+static void main_apply_net_status(const main_net_status_t *st)
+{
+    const char *ap_ssid = st->ap_active && st->ap_ssid[0] ? st->ap_ssid : NULL;
 
     ESP_LOGI(TAG, "Wi-Fi state: sta_connected=%d ap_active=%d mode=%s ap_ssid=%s",
-             connected,
-             status.ap_active,
-             status.mode ? status.mode : "off",
+             st->connected, st->ap_active,
+             st->mode[0] ? st->mode : "off",
              ap_ssid ? ap_ssid : "(none)");
 
-    esp_err_t err = app_claw_set_network_status(connected, ap_ssid);
+    esp_err_t err = app_claw_set_network_status(st->connected, ap_ssid);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to update network UI: %s", esp_err_to_name(err));
     }
@@ -154,8 +187,68 @@ static void on_wifi_state_changed(bool connected, void *user_ctx)
 #if CONFIG_MP4_ROBOT_ENABLE
     /* The face carries this line itself: system_ui's status bar is on a home
      * screen this board cannot show. */
-    cap_display_face_set_network(connected, ap_ssid, status.sta_ip);
+    cap_display_face_set_network(st->connected, ap_ssid, st->sta_ip);
 #endif
+}
+
+static void main_net_status_task(void *arg)
+{
+    (void)arg;
+    main_net_status_t st;
+
+    for (;;) {
+        if (xQueueReceive(s_net_status_queue, &st, portMAX_DELAY) == pdTRUE) {
+            main_apply_net_status(&st);
+        }
+    }
+}
+
+static esp_err_t main_net_status_start(void)
+{
+    s_net_status_queue = xQueueCreate(1, sizeof(main_net_status_t));
+    ESP_RETURN_ON_FALSE(s_net_status_queue, ESP_ERR_NO_MEM, TAG,
+                        "Failed to create network status queue");
+
+    /* 4 KB because LVGL is on the far end of this. Low priority: nothing
+     * waits on it, and it must never preempt the gait task. */
+    BaseType_t ok = xTaskCreate(main_net_status_task, "net_status", 4096,
+                                NULL, 3, NULL);
+    if (ok != pdPASS) {
+        vQueueDelete(s_net_status_queue);
+        s_net_status_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+static void on_wifi_state_changed(bool connected, void *user_ctx)
+{
+    (void)user_ctx;
+
+    wifi_manager_status_t status = {0};
+    wifi_manager_get_status(&status);
+
+    main_net_status_t st = {0};
+    st.connected = connected;
+    st.ap_active = status.ap_active;
+    if (status.mode) {
+        strlcpy(st.mode, status.mode, sizeof(st.mode));
+    }
+    if (status.ap_active && status.ap_ssid) {
+        strlcpy(st.ap_ssid, status.ap_ssid, sizeof(st.ap_ssid));
+    }
+    if (status.sta_ip) {
+        strlcpy(st.sta_ip, status.sta_ip, sizeof(st.sta_ip));
+    }
+
+    if (s_net_status_queue) {
+        xQueueOverwrite(s_net_status_queue, &st);
+    } else {
+        /* Before the worker exists -- the first callback can arrive from
+         * inside wifi_manager_start(). That one runs on the caller's stack,
+         * which is app_main's, and has room. */
+        main_apply_net_status(&st);
+    }
 }
 
 /* One line saying how much room is left, and -- more usefully -- the largest
@@ -738,6 +831,11 @@ void app_main(void)
 #endif
         },
     }));
+    /* Before the callback is registered, so no event can find a half-built
+     * worker. */
+    if (main_net_status_start() != ESP_OK) {
+        ESP_LOGW(TAG, "Network status worker unavailable; updates run inline");
+    }
     ESP_ERROR_CHECK(wifi_manager_register_state_callback(on_wifi_state_changed, NULL));
 
     log_wifi_startup_config(s_config);
