@@ -268,6 +268,121 @@ int mpx_audio_get_mic_gain(void) { return (int)s_mic_gain_db; }
 
 int mpx_audio_get_volume(void) { return s_volume; }
 
+/* ── streaming ─────────────────────────────────────────────────────────────
+ *
+ * Same codec, same I2S channel as the file calls, but held open across calls
+ * so a caller can push frames through Opus and a socket without paying an
+ * open/close per block. */
+
+static bool     s_cap_open;
+static uint8_t  s_cap_channels = 1;
+static uint8_t  s_cap_pick;
+static int16_t *s_cap_scratch;      /* interleaved, straight off the codec */
+static int16_t *s_out_scratch;      /* stereo, after volume */
+
+esp_err_t mpx_audio_capture_start(uint32_t sample_rate, uint8_t channels, uint8_t pick)
+{
+    int rc;
+
+    ESP_RETURN_ON_FALSE(mpx_audio_have_mic(), ESP_ERR_NOT_SUPPORTED, TAG,
+                        "no microphone on this board");
+    ESP_RETURN_ON_FALSE(channels >= 1 && channels <= 4 && pick < channels,
+                        ESP_ERR_INVALID_ARG, TAG, "bad channel selection");
+    if (s_cap_open) {
+        return ESP_OK;
+    }
+
+    /* Non-zero mask, for the reason spelled out in mpx_audio_record_wav. */
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel         = channels,
+        .channel_mask    = (uint16_t)((1u << channels) - 1u),
+        .sample_rate     = sample_rate,
+        .mclk_multiple   = 0,
+    };
+
+    rc = esp_codec_dev_open(s_mic->codec_dev, &fs);
+    ESP_RETURN_ON_FALSE(rc == 0, ESP_FAIL, TAG, "codec open failed: rc=%d", rc);
+
+    if (esp_codec_dev_set_in_channel_gain(s_mic->codec_dev, fs.channel_mask,
+                                          s_mic_gain_db) != 0) {
+        (void)esp_codec_dev_set_in_gain(s_mic->codec_dev, s_mic_gain_db);
+    }
+
+    s_cap_scratch = audio_alloc(MPX_AUDIO_MAX_FRAMES * channels * sizeof(int16_t));
+    if (!s_cap_scratch) {
+        esp_codec_dev_close(s_mic->codec_dev);
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_cap_channels = channels;
+    s_cap_pick = pick;
+    s_cap_open = true;
+    return ESP_OK;
+}
+
+esp_err_t mpx_audio_capture_read(int16_t *mono, size_t frames)
+{
+    ESP_RETURN_ON_FALSE(s_cap_open, ESP_ERR_INVALID_STATE, TAG, "capture not started");
+    ESP_RETURN_ON_FALSE(mono && frames && frames <= MPX_AUDIO_MAX_FRAMES,
+                        ESP_ERR_INVALID_ARG, TAG, "bad frame count");
+
+    const int bytes = (int)(frames * s_cap_channels * sizeof(int16_t));
+    const int rc = esp_codec_dev_read(s_mic->codec_dev, s_cap_scratch, bytes);
+    ESP_RETURN_ON_FALSE(rc == 0, ESP_FAIL, TAG, "read failed: rc=%d", rc);
+
+    for (size_t i = 0; i < frames; i++) {
+        mono[i] = s_cap_scratch[i * s_cap_channels + s_cap_pick];
+    }
+    return ESP_OK;
+}
+
+void mpx_audio_capture_stop(void)
+{
+    if (!s_cap_open) {
+        return;
+    }
+    esp_codec_dev_close(s_mic->codec_dev);
+    free(s_cap_scratch);
+    s_cap_scratch = NULL;
+    s_cap_open = false;
+}
+
+esp_err_t mpx_audio_output_start(uint32_t sample_rate)
+{
+    ESP_RETURN_ON_ERROR(audio_out_open(sample_rate), TAG, "cannot open I2S output");
+
+    if (!s_out_scratch) {
+        s_out_scratch = audio_alloc(MPX_AUDIO_MAX_FRAMES * 2u * sizeof(int16_t));
+        if (!s_out_scratch) {
+            audio_out_close();
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    return ESP_OK;
+}
+
+esp_err_t mpx_audio_output_write(const int16_t *mono, size_t frames)
+{
+    ESP_RETURN_ON_FALSE(s_out_scratch, ESP_ERR_INVALID_STATE, TAG, "output not started");
+    ESP_RETURN_ON_FALSE(mono && frames && frames <= MPX_AUDIO_MAX_FRAMES,
+                        ESP_ERR_INVALID_ARG, TAG, "bad frame count");
+
+    for (size_t i = 0; i < frames; i++) {
+        const int16_t v = (int16_t)((int32_t)mono[i] * s_volume / 100);
+        s_out_scratch[i * 2]     = v;
+        s_out_scratch[i * 2 + 1] = v;
+    }
+    return audio_out_write(s_out_scratch, frames * 2u * sizeof(int16_t));
+}
+
+void mpx_audio_output_stop(void)
+{
+    audio_out_close();
+    free(s_out_scratch);
+    s_out_scratch = NULL;
+}
+
 /* ── record ──────────────────────────────────────────────────────────────── */
 
 esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
@@ -620,5 +735,33 @@ int  mpx_audio_get_volume(void)        { return s_volume_stub; }
 static int s_gain_stub = 30;
 void mpx_audio_set_mic_gain(int db) { s_gain_stub = db; }
 int  mpx_audio_get_mic_gain(void)   { return s_gain_stub; }
+
+esp_err_t mpx_audio_capture_start(uint32_t sample_rate, uint8_t channels, uint8_t pick)
+{
+    (void)sample_rate; (void)channels; (void)pick;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t mpx_audio_capture_read(int16_t *mono, size_t frames)
+{
+    (void)mono; (void)frames;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+void mpx_audio_capture_stop(void) { }
+
+esp_err_t mpx_audio_output_start(uint32_t sample_rate)
+{
+    (void)sample_rate;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t mpx_audio_output_write(const int16_t *mono, size_t frames)
+{
+    (void)mono; (void)frames;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+void mpx_audio_output_stop(void) { }
 
 #endif  /* CONFIG_ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT */

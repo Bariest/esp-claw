@@ -13,6 +13,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -65,6 +66,28 @@ esp_err_t mpx_audio_play_tone(uint32_t hz, uint32_t seconds);
  * reach I2S. */
 void mpx_audio_set_volume(int percent);
 int  mpx_audio_get_volume(void);
+
+/* ── Streaming ─────────────────────────────────────────────────────────────
+ *
+ * The file-based calls above are for bring-up. Everything after Phase 1 wants
+ * frames: capture a block, encode it, send it; receive a block, decode it,
+ * play it. These keep the codec open across calls so that is possible.
+ *
+ * Capture yields MONO -- one channel picked out of `channels`, as with
+ * mpx_audio_record_wav -- and playback takes mono and duplicates it to both
+ * I2S slots. Mono is what Opus and every speech model want.
+ *
+ * At most MPX_AUDIO_MAX_FRAMES per call. A 60 ms Opus frame at 16 kHz is 960,
+ * so this is two of them. */
+#define MPX_AUDIO_MAX_FRAMES  1920
+
+esp_err_t mpx_audio_capture_start(uint32_t sample_rate, uint8_t channels, uint8_t pick);
+esp_err_t mpx_audio_capture_read(int16_t *mono, size_t frames);
+void      mpx_audio_capture_stop(void);
+
+esp_err_t mpx_audio_output_start(uint32_t sample_rate);
+esp_err_t mpx_audio_output_write(const int16_t *mono, size_t frames);
+void      mpx_audio_output_stop(void);
 
 /* Microphone gain in dB, 0-60, applied on the next recording. */
 void mpx_audio_set_mic_gain(int db);

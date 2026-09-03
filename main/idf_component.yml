@@ -110,6 +110,13 @@ dependencies:
     - if: $CONFIG{MP4_ROBOT_ENABLE} == True
     path: ../components/mpx_audio
 
+  # Opus, and later the WebSocket to the voice server. Phase 2 of
+  # docs/voice-plan.md.
+  mpx_voice_link:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_voice_link
+
   # Acoustic front end, WakeNet and MultiNet. Large: it brings esp-dl and
   # esp-dsp with it, and the first build downloads several hundred MB.
   espressif/esp-sr:

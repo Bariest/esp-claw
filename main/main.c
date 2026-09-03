@@ -43,6 +43,7 @@
 #include "cap_mpx_skill.h"
 #include "mpx_selftest.h"
 #include "mpx_audio.h"
+#include "mpx_voice_link.h"
 /* cap_display is built for every MP4_ROBOT_ENABLE configuration, panel or no
  * panel -- see main/idf_component.yml. Do NOT put this include behind
  * CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT: the face calls below are guarded
@@ -1053,6 +1054,7 @@ void app_main(void)
 #if CONFIG_MP4_ROBOT_ENABLE
     register_selftest_command();
     register_audio_command();
+    register_voice_command();
 #endif
 
 #if APP_ENABLE_MEM_LOG
