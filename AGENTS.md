@@ -181,6 +181,36 @@ Five things that are not obvious and have already cost time once:
 `boards/mp4_esp32_core/README.md` has the full pin table and the list of values
 that still need confirming on hardware.
 
+## PSRAM is load-bearing, and XIP_FROM_PSRAM is part of that
+
+This firmware does not run without PSRAM, and `CONFIG_SPIRAM_XIP_FROM_PSRAM`
+is not an optimisation you can switch off.
+
+ESP-Claw puts task stacks in external RAM by default: `claw_task_memory_caps()`
+returns `MALLOC_CAP_SPIRAM` for every policy except `INTERNAL_ONLY`, and
+`cap_mcp_server` does it unconditionally, with no Kconfig guard. A flash read
+from one of those tasks disables the instruction cache, and with the cache off
+the task's own stack is unreachable. IDF asserts rather than faulting:
+
+    assert failed: spi_flash_disable_interrupts_caches_and_other_cpu
+    cache_utils.c:127 (esp_task_stack_is_sane_cache_disabled())
+
+`XIP_FROM_PSRAM` is what makes it safe -- with code executing from PSRAM the
+cache is never disabled for a flash read. Turn it off and the firmware works
+until the first request that touches the filesystem, then dies inside `stat()`,
+which reads like a filesystem bug and is not one.
+
+Two consequences:
+
+- **Do not chase `SPIRAM_IGNORE_NOTFOUND`.** It is incompatible with
+  `XIP_FROM_PSRAM` and the other fixed-address PSRAM placements. A board with
+  no PSRAM should fail loudly at boot; it could not run the agent anyway
+  (`app_claw_start()` returns `ESP_ERR_NO_MEM`).
+- **Our own httpd task stack is pinned to internal RAM regardless**
+  (`http_server_core.c`). It serves files from the FAT partition on every
+  request, so it is the one task guaranteed to hit flash. That fix stands on
+  its own and does not depend on the XIP setting -- which is the point.
+
 ## -Werror=comment
 
 A `/*` inside a block comment is a **build failure**, not a warning. This has

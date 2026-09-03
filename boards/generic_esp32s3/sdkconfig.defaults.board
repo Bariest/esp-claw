@@ -24,19 +24,31 @@ CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 CONFIG_SPIRAM_MEMTEST=n
 
-# Boot anyway if no PSRAM answers, so a different devkit degrades to a warning
-# instead of a panic -- which is the whole point of this board file.
+# PSRAM is REQUIRED for this firmware. There is no graceful degradation here
+# and attempting one was a mistake worth recording.
 #
-# The three settings below are turned OFF to make that possible. Each one
-# places something at a fixed address in PSRAM (.bss, .noinit, and cached
-# flash code respectively), and IGNORE_NOTFOUND cannot rescue a boot that has
-# already put static data somewhere that does not exist. They are enabled in
-# the project-wide sdkconfig.defaults for the MP4 board, which always has its
-# PSRAM; this board overrides them.
-CONFIG_SPIRAM_IGNORE_NOTFOUND=y
-CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=n
-CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY=n
-CONFIG_SPIRAM_XIP_FROM_PSRAM=n
+# SPIRAM_IGNORE_NOTFOUND was set here so a devkit without PSRAM would warn and
+# boot. To make that legal, XIP_FROM_PSRAM had to come off -- IGNORE_NOTFOUND
+# cannot rescue a boot that has already placed data at a fixed PSRAM address.
+# Turning XIP off is what produced this crash:
+#
+#   assert failed: spi_flash_disable_interrupts_caches_and_other_cpu
+#   cache_utils.c:127 (esp_task_stack_is_sane_cache_disabled())
+#
+# ESP-Claw puts task stacks in PSRAM by default -- claw_task_memory_caps()
+# returns MALLOC_CAP_SPIRAM for every policy except INTERNAL_ONLY, and
+# cap_mcp_server does it with no Kconfig guard at all. A flash read from such
+# a task disables the instruction cache, and with the cache off its own stack
+# is unreachable. XIP_FROM_PSRAM is what makes that safe: with code running
+# from PSRAM the cache is never disabled for a flash read. It is not an
+# optimisation, it is load-bearing, which is why the project-wide
+# sdkconfig.defaults sets it.
+#
+# So: keep the project's PSRAM settings, and let a board with no PSRAM fail
+# loudly at boot with "PSRAM not found" rather than crash later inside a file
+# read. Without PSRAM app_claw_start() returns ESP_ERR_NO_MEM anyway, so there
+# was never a working headless configuration to preserve.
+CONFIG_SPIRAM_IGNORE_NOTFOUND=n
 
 # Kept on so the `selftest` console command is built. Its robot checks report
 # nothing found, which is the correct answer here; mpx_robot_init() failing is

@@ -105,13 +105,32 @@ esp_err_t http_server_start(void)
     config.max_open_sockets = 12;
     config.lru_purge_enable = true;
 
-    uint32_t task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
-    if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) >= config.stack_size) {
-        task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    }
-#endif
-    config.task_caps = task_caps;
+    /* The httpd task stack MUST stay in internal RAM. Do not move it to PSRAM
+     * to save a few KB -- that was tried, and this is what happens.
+     *
+     * Every request that serves a file reaches the FAT partition on flash.
+     * esp_flash_read() disables the instruction cache while the SPI flash is
+     * busy, and with the cache off, PSRAM is unreachable -- including a task
+     * stack that lives there. IDF catches it with an assert rather than
+     * letting it fault:
+     *
+     *   assert failed: spi_flash_disable_interrupts_caches_and_other_cpu
+     *   cache_utils.c:127 (esp_task_stack_is_sane_cache_disabled())
+     *
+     * The crash lands in stat() under web_send_file(), which reads like a
+     * filesystem bug and is not one.
+     *
+     * This is inherited code, and it was safe upstream: ESP-Claw serves its
+     * web assets out of ramfs, so its httpd task never touches flash. Moving
+     * both bundles to the system partition -- which is what let the app image
+     * shrink by ~70 KB while gaining a whole UI -- is what made a PSRAM stack
+     * unsafe here.
+     *
+     * CONFIG_SPIRAM_XIP_FROM_PSRAM hides it, because with code running from
+     * PSRAM the cache is never disabled for a flash read. That is why the MP4
+     * board would not have shown this and a plain devkit does. It is not a
+     * fix; it is one config option away from returning. */
+    config.task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
     config.close_fn = http_server_close_fn;
     config.uri_match_fn = httpd_uri_match_wildcard;
