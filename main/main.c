@@ -21,6 +21,7 @@
 #include "esp_err.h"
 #include "esp_check.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_board_manager_includes.h"
 #include "captive_dns.h"
 #include "cmd_wifi.h"
@@ -121,6 +122,29 @@ static void on_wifi_state_changed(bool connected, void *user_ctx)
      * screen this board cannot show. */
     cap_display_face_set_network(connected, ap_ssid, status.sta_ip);
 #endif
+}
+
+/* One line saying how much room is left, and -- more usefully -- the largest
+ * single block, because an allocation fails on contiguous space long before
+ * the total runs out. Called at the points where the boot sequence takes its
+ * big bites, so an ESP_ERR_NO_MEM has a number next to it instead of being a
+ * guess. Cheap enough to leave in unconditionally. */
+static void main_log_heap(const char *stage)
+{
+    const size_t internal_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t internal_block =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+
+    if (psram_free) {
+        ESP_LOGI(TAG, "heap [%s]: internal %u free / %u largest, PSRAM %u free",
+                 stage, (unsigned)internal_free, (unsigned)internal_block,
+                 (unsigned)psram_free);
+    } else {
+        ESP_LOGI(TAG, "heap [%s]: internal %u free / %u largest, no PSRAM",
+                 stage, (unsigned)internal_free, (unsigned)internal_block);
+    }
 }
 
 static esp_err_t main_load_config(app_config_t *config)
@@ -609,6 +633,7 @@ void app_main(void)
 #endif
 
 
+    main_log_heap("boot");
     ESP_ERROR_CHECK(wifi_manager_init());
 
     /* Also non-fatal, for the same reason: on a board whose panel failed to
@@ -726,7 +751,27 @@ void app_main(void)
     app_register_robot_capabilities();
 #endif
 
-    ESP_ERROR_CHECK(app_claw_start(s_claw_config));
+    main_log_heap("before agent");
+
+    /* Non-fatal, like every other subsystem above.
+     *
+     * ESP_ERR_NO_MEM here is the expected outcome on a devkit with no PSRAM:
+     * the agent, the scheduler, the event router and the Lua VM all expect
+     * external RAM to spill into. Aborting turns that into a boot loop with
+     * no console; continuing leaves Wi-Fi, the web server and the console
+     * commands up, which is enough to read the heap numbers above and decide
+     * what to turn off. */
+    const esp_err_t claw_err = app_claw_start(s_claw_config);
+    if (claw_err != ESP_OK) {
+        ESP_LOGE(TAG, "Agent did not start: %s", esp_err_to_name(claw_err));
+        if (claw_err == ESP_ERR_NO_MEM) {
+            ESP_LOGE(TAG, "Out of internal RAM. This build expects PSRAM. "
+                          "Enable CONFIG_SPIRAM for your module, or set "
+                          "MP4_ROBOT_ENABLE=n to drop the robot stack.");
+        }
+    } else {
+        main_log_heap("after agent");
+    }
 #if CONFIG_APP_CLAW_CAP_IM_LOCAL
     ESP_ERROR_CHECK(http_server_webim_bind_im());
 #endif
