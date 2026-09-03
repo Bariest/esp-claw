@@ -42,6 +42,12 @@ static uint32_t s_downlink_rate = MPX_VOICE_DOWNLINK_RATE;
 static SemaphoreHandle_t s_handshake;
 static uint32_t s_audio_frames;
 
+/* Whether the WebSocket upgrade ever completed. The distinction matters when
+ * reporting a failure: "the server never accepted the upgrade" and "the
+ * server accepted it and then said nothing" have completely different
+ * causes, and both look like a timeout from the caller's side. */
+static bool s_socket_opened;
+
 /* ── outgoing ────────────────────────────────────────────────────────────── */
 
 esp_err_t mpx_voice_send_json(const char *json)
@@ -169,6 +175,7 @@ static void voice_ws_event(void *arg, esp_event_base_t base,
     switch (event_id) {
         case WEBSOCKET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "socket open");
+            s_socket_opened = true;
             s_state = MPX_VOICE_HANDSHAKING;
             s_audio_frames = 0;
             if (voice_send_hello() != ESP_OK) {
@@ -260,6 +267,7 @@ esp_err_t mpx_voice_connect(const char *url, const char *token)
                         TAG, "cannot register events");
 
     s_state = MPX_VOICE_CONNECTING;
+    s_socket_opened = false;
     ESP_LOGI(TAG, "connecting to %s", url);
 
     const esp_err_t err = esp_websocket_client_start(s_client);
@@ -273,9 +281,23 @@ esp_err_t mpx_voice_connect(const char *url, const char *token)
      * path, wrong token, wrong protocol version -- and reporting success on
      * TCP alone would hide every one of them. */
     if (xSemaphoreTake(s_handshake, pdMS_TO_TICKS(VOICE_HANDSHAKE_MS)) != pdTRUE) {
-        ESP_LOGE(TAG, "no hello from the server within %d ms", VOICE_HANDSHAKE_MS);
-        ESP_LOGE(TAG, "the socket may be open but the path, token or protocol "
-                      "version disagree");
+        if (!s_socket_opened) {
+            /* The WebSocket upgrade never completed. If the log above shows
+             * "Connection reset by peer" and "Error read response for Upgrade
+             * header", TCP reached the server and it hung up without even
+             * sending an HTTP response -- which is what a server does when
+             * the PATH is not one it serves. A firewall or wrong address
+             * fails earlier and differently, with a refusal or a timeout. */
+            ESP_LOGE(TAG, "the server closed the connection during the "
+                          "WebSocket upgrade");
+            ESP_LOGE(TAG, "the address and port are reachable, so the PATH is "
+                          "the likely problem -- check what the server prints "
+                          "at startup, it names the websocket URL it serves");
+        } else {
+            ESP_LOGE(TAG, "socket opened but no hello within %d ms -- the token "
+                          "or the protocol version is the likely problem",
+                     VOICE_HANDSHAKE_MS);
+        }
         return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
