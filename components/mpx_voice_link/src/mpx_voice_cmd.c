@@ -20,17 +20,24 @@ static void voice_usage(void)
 {
     printf("\n"
            "  voice loopback [secs]        microphone -> Opus -> speaker, no network\n"
-           "  voice connect <url> [token]  open a xiaozhi websocket\n"
+           "  voice provision [ota-url]    ask the cloud where to connect\n"
+           "  voice connect [url] [token]  open the websocket (no args = provisioned)\n"
            "  voice disconnect             close it\n"
            "  voice send <json>            send one raw control message\n"
            "  voice info                   link state, session, frame sizes\n"
            "\n"
-           "  voice connect ws://192.168.1.50:8000/xiaozhi/v1/\n"
+           "The websocket URL is NOT something you type. The device asks the\n"
+           "OTA endpoint and is told where to connect and with what token, so\n"
+           "the order is:\n"
+           "\n"
+           "  1. voice provision            first time, prints a 6-digit code\n"
+           "  2. enter that code in the Xiaozhi console under Add Device\n"
+           "  3. voice provision            again, now it returns a url\n"
+           "  4. voice connect              no arguments needed\n"
            "\n"
            "Connect waits for the server's hello, not just for the socket to\n"
            "open. A socket that opens and then says nothing is the usual\n"
-           "failure -- wrong path, wrong token, wrong protocol version -- and\n"
-           "reporting success on TCP alone would hide all of them.\n"
+           "failure, and reporting success on TCP alone would hide it.\n"
            "\n"
            "Loopback is the Phase 2 gate. Hearing yourself proves the encoder,\n"
            "the decoder and the frame arithmetic without a server existing --\n"
@@ -54,12 +61,20 @@ static int voice_cmd(int argc, char **argv)
         return 0;
     }
 
-    if (strcmp(argv[1], "connect") == 0) {
-        if (argc < 3) {
-            printf("  usage: voice connect ws://<host>:<port>/xiaozhi/v1/ [token]\n");
+    if (strcmp(argv[1], "provision") == 0) {
+        const esp_err_t err = mpx_voice_provision((argc >= 3) ? argv[2] : NULL);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "provision failed: %s", esp_err_to_name(err));
             return 1;
         }
-        const esp_err_t err = mpx_voice_connect(argv[2], (argc >= 4) ? argv[3] : NULL);
+        printf("  websocket %s\n", mpx_voice_stored_url());
+        return 0;
+    }
+
+    if (strcmp(argv[1], "connect") == 0) {
+        /* No arguments is the normal case: use what provisioning found. */
+        const esp_err_t err = mpx_voice_connect((argc >= 3) ? argv[2] : NULL,
+                                                (argc >= 4) ? argv[3] : NULL);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "connect failed: %s", esp_err_to_name(err));
             return 1;
@@ -91,6 +106,8 @@ static int voice_cmd(int argc, char **argv)
         printf("  session      : %s\n",
                mpx_voice_session_id()[0] ? mpx_voice_session_id() : "(none)");
         printf("  downlink     : %u Hz\n", (unsigned)mpx_voice_downlink_rate());
+        printf("  provisioned  : %s\n",
+               mpx_voice_stored_url()[0] ? mpx_voice_stored_url() : "(no -- run voice provision)");
         printf("  codec        : %s\n", mpx_voice_codec_running() ? "running" : "stopped");
         printf("  uplink       : %d Hz, %d frames per %d ms\n",
                MPX_VOICE_UPLINK_RATE, MPX_VOICE_UPLINK_FRAME, MPX_VOICE_FRAME_MS);

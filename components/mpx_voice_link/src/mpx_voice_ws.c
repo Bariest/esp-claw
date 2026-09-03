@@ -224,7 +224,17 @@ esp_err_t mpx_voice_connect(const char *url, const char *token)
     char headers[VOICE_HEADER_MAX];
     uint8_t mac[6] = {0};
 
-    ESP_RETURN_ON_FALSE(url && url[0], ESP_ERR_INVALID_ARG, TAG, "no url");
+    /* Fall back to whatever `voice provision` discovered, which is the normal
+     * case -- the cloud tells the device where to connect, so a hand-typed
+     * URL is the exception. */
+    if (!url || !url[0]) {
+        url = mpx_voice_stored_url();
+    }
+    if (!token || !token[0]) {
+        token = mpx_voice_stored_token();
+    }
+    ESP_RETURN_ON_FALSE(url && url[0], ESP_ERR_INVALID_ARG, TAG,
+                        "no url -- run `voice provision` first");
     if (s_client) {
         mpx_voice_disconnect();
     }
@@ -239,7 +249,7 @@ esp_err_t mpx_voice_connect(const char *url, const char *token)
                                  "Protocol-Version: 1\r\n"
                                  "Device-Id: %02x:%02x:%02x:%02x:%02x:%02x\r\n"
                                  "Client-Id: %02x%02x%02x%02x%02x%02x\r\n",
-                                 (token && token[0]) ? token : "test-token",
+                                 (token && token[0]) ? token : "none",
                                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
                                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ESP_RETURN_ON_FALSE(written > 0 && written < (int)sizeof(headers),

@@ -4,6 +4,7 @@ idf_component_register(
     SRCS
         "src/mpx_voice_codec.cc"
         "src/mpx_voice_ws.c"
+        "src/mpx_voice_ota.c"
         "src/mpx_voice_cmd.c"
     INCLUDE_DIRS
         "include"
@@ -12,6 +13,10 @@ idf_component_register(
         console
         json
         esp_hw_support
+        esp_http_client
+        esp-tls
+        nvs_flash
+        app_update
         # Managed components are named <namespace>__<name> once they are in
         # the build, so the plain registry name does not resolve:
         #

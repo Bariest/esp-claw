@@ -65,6 +65,22 @@ typedef enum {
     MPX_VOICE_READY,         /* session established */
 } mpx_voice_state_t;
 
+/* ── Provisioning ──────────────────────────────────────────────────────────
+ *
+ * The websocket URL is not something you configure. The device asks an OTA
+ * endpoint for it, and the reply carries the address and the token -- plus,
+ * the first time, a six-digit code to type into the Xiaozhi console to bind
+ * the device to an agent.
+ *
+ * So the order is: provision, read the code, bind it in the console,
+ * provision again, then connect. */
+#define MPX_VOICE_DEFAULT_OTA_URL  "https://api.tenclass.net/xiaozhi/ota/"
+
+esp_err_t mpx_voice_provision(const char *ota_url);
+const char *mpx_voice_stored_url(void);
+const char *mpx_voice_stored_token(void);
+
+/* Passing NULL for either uses whatever provisioning stored. */
 esp_err_t mpx_voice_connect(const char *url, const char *token);
 void      mpx_voice_disconnect(void);
 
