@@ -32,6 +32,7 @@ static void audio_usage(void)
     printf("\n"
            "  audio info                       what the board has, and the current volume\n"
            "  audio rec [secs] [pick] [chans]  record to /fatfs/%s\n"
+           "  audio tone [hz] [secs]           play a generated sine -- speaker test\n"
            "  audio play [path]                play a 16-bit WAV from the data root\n"
            "  audio vol [0-100]                software output volume\n"
            "\n"
@@ -45,6 +46,7 @@ static void audio_usage(void)
            "to change: the ES7210 runs in TDM and the I2S slot configuration may\n"
            "not agree with what was asked for. Try 1, 2 and 4.\n"
            "\n"
+           "  audio tone 440 2                 if this is silent, it is not the mic\n"
            "  audio rec 5 0 2                  5 s, first channel of two\n"
            "  audio play audio/rec.wav         hear it back through the speaker\n"
            "\n"
@@ -82,6 +84,17 @@ static int audio_cmd(int argc, char **argv)
                                                    AUDIO_DEFAULT_RATE, chans, pick);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "record failed: %s", esp_err_to_name(err));
+            return 1;
+        }
+        return 0;
+    }
+
+    if (strcmp(argv[1], "tone") == 0) {
+        const uint32_t hz   = (argc >= 3) ? (uint32_t)atoi(argv[2]) : 440;
+        const uint32_t secs = (argc >= 4) ? (uint32_t)atoi(argv[3]) : 2;
+        const esp_err_t err = mpx_audio_play_tone(hz, secs);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "tone failed: %s", esp_err_to_name(err));
             return 1;
         }
         return 0;

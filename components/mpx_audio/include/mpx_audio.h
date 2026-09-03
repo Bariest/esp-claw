@@ -48,6 +48,15 @@ esp_err_t mpx_audio_record_wav(const char *rel_path,
  * I2S slots; the sample rate comes from the file. */
 esp_err_t mpx_audio_play_wav(const char *rel_path);
 
+/* Play a sine wave, generated on the fly.
+ *
+ * The point of this is diagnosis: it takes the microphone, the filesystem and
+ * the recording out of the question entirely. If a tone is audible then the
+ * amplifier, the speaker, the I2S wiring and the volume are all fine, and
+ * anything still wrong is on the capture side. If it is not audible, nothing
+ * on the capture side can be blamed. */
+esp_err_t mpx_audio_play_tone(uint32_t hz, uint32_t seconds);
+
 /* Software volume, 0-100.
  *
  * Software because the MAX98357A on these boards has no control interface at

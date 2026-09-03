@@ -20,6 +20,7 @@ static const char *TAG = "mpx_audio";
 
 #include <errno.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -110,6 +111,29 @@ static esp_err_t audio_prepare_path(const char *rel, char *out, size_t out_size)
     return ESP_OK;
 }
 
+/* Integer square root, for the RMS report. sqrt() from libm would work, but
+ * it drags float formatting into a logging path that runs on the console
+ * task, and this is exact enough for a level meter. */
+static uint32_t isqrt64(uint64_t value)
+{
+    uint64_t root = 0;
+    uint64_t bit = 1ULL << 62;
+
+    while (bit > value) {
+        bit >>= 2;
+    }
+    while (bit) {
+        if (value >= root + bit) {
+            value -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (uint32_t)root;
+}
+
 static void *audio_alloc(size_t size)
 {
     /* PSRAM first: these buffers are large and nothing DMAs straight out of
@@ -175,6 +199,9 @@ esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
     FILE *f = NULL;
     esp_err_t ret = ESP_OK;
     uint32_t written_bytes = 0;
+    int32_t peak = 0;
+    uint64_t energy = 0;
+    uint32_t energy_count = 0;
     int rc;
 
     ESP_RETURN_ON_FALSE(mpx_audio_have_mic(), ESP_ERR_NOT_SUPPORTED, TAG,
@@ -185,10 +212,31 @@ esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
                         "pick must be below channels");
     ESP_RETURN_ON_ERROR(audio_prepare_path(rel_path, full, sizeof(full)), TAG, "bad path");
 
+    /* channel_mask MUST be non-zero. This is not a preference.
+     *
+     * es7210_config_fs() contains:
+     *
+     *     if (es7210_is_tdm_mode(codec) && fs->channel <= 2 &&
+     *             fs->channel_mask == 0) {
+     *         bits >>= 1;
+     *     }
+     *
+     * With the ES7210 in TDM and a request for two channels and no mask, the
+     * driver silently HALVES the sample width -- the log line is
+     * "ES7210: Bits 8" -- so it can pack two 8-bit TDM channels into each
+     * 16-bit I2S slot. That is a deliberate trick for reading four
+     * microphones through a two-slot I2S port, but the buffer that comes back
+     * is not 16-bit PCM: each word holds two different channels, one per
+     * byte. Read it as int16 and you get noise at very low level, which
+     * sounds exactly like a broken microphone or a dead speaker.
+     *
+     * Passing a real mask skips that branch, keeps the ADC at 16 bits, and
+     * gives ordinary interleaved PCM. (1 << channels) - 1 selects the first
+     * `channels` channels, which is what the de-interleave below assumes. */
     esp_codec_dev_sample_info_t fs = {
         .bits_per_sample = 16,
         .channel         = channels,
-        .channel_mask    = 0,          /* 0 means "give me all of them" */
+        .channel_mask    = (uint16_t)((1u << channels) - 1u),
         .sample_rate     = sample_rate,
         .mclk_multiple   = 0,          /* 0 means 256x, which is what the board wires */
     };
@@ -237,6 +285,15 @@ esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
             mono[i] = src[i * channels + pick];
         }
 
+        for (uint32_t i = 0; i < frames_per_chunk; i++) {
+            const int32_t v = mono[i] < 0 ? -(int32_t)mono[i] : mono[i];
+            if (v > peak) {
+                peak = v;
+            }
+            energy += (uint64_t)((int32_t)mono[i] * (int32_t)mono[i]);
+            energy_count++;
+        }
+
         const size_t bytes = frames_per_chunk * sizeof(int16_t);
         if (fwrite(mono, 1, bytes, f) != bytes) {
             ESP_LOGE(TAG, "short write -- storage full?");
@@ -255,6 +312,20 @@ esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
         goto cleanup;
     }
 
+    /* The single most useful number here, because it answers "did the
+     * microphone hear anything" without leaving the console. Full scale is
+     * 32767; a silent channel sits in the low tens. */
+    {
+        const uint32_t rms = energy_count
+                             ? (uint32_t)isqrt64(energy / energy_count) : 0;
+        ESP_LOGI(TAG, "level: peak %" PRId32 " / 32767, rms %" PRIu32,
+                 peak, rms);
+        if (peak < 200) {
+            ESP_LOGW(TAG, "that is silence -- wrong channel, or the "
+                          "microphone is not being reached");
+        }
+    }
+
     ESP_LOGI(TAG, "wrote %s (%" PRIu32 " bytes)", full, written_bytes);
     ESP_LOGI(TAG, "download it: http://<robot-ip>/files/%s", rel_path);
 
@@ -265,6 +336,76 @@ cleanup:
     free(chunk);
     free(mono);
     esp_codec_dev_close(s_mic->codec_dev);
+    return ret;
+}
+
+/* ── tone ──────────────────────────────────────────────────────────────── */
+
+esp_err_t mpx_audio_play_tone(uint32_t hz, uint32_t seconds)
+{
+    const uint32_t rate = 16000;
+    int16_t *buf = NULL;
+    esp_err_t ret = ESP_OK;
+    int rc;
+
+    ESP_RETURN_ON_FALSE(mpx_audio_have_speaker(), ESP_ERR_NOT_SUPPORTED, TAG,
+                        "no speaker on this board");
+    ESP_RETURN_ON_FALSE(hz >= 20 && hz <= rate / 2, ESP_ERR_INVALID_ARG, TAG,
+                        "frequency must be 20 Hz to %" PRIu32 " Hz", rate / 2);
+
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel         = 2,
+        .channel_mask    = 0,
+        .sample_rate     = rate,
+        .mclk_multiple   = 0,
+    };
+
+    rc = esp_codec_dev_open(s_spk->codec_dev, &fs);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "codec open failed: rc=%d", rc);
+        return ESP_FAIL;
+    }
+
+    const uint32_t frames_per_chunk = AUDIO_CHUNK_BYTES / 4u;
+    buf = audio_alloc(frames_per_chunk * 2u * sizeof(int16_t));
+    ESP_GOTO_ON_FALSE(buf, ESP_ERR_NO_MEM, cleanup, TAG, "out of memory");
+
+    ESP_LOGI(TAG, "playing %" PRIu32 " Hz for %" PRIu32 " s at volume %d%%",
+             hz, seconds, s_volume);
+
+    /* A third of full scale on purpose: a full-scale tone into a small
+     * speaker is unpleasant and tells you nothing extra. */
+    const float amplitude = 10000.0f * (float)s_volume / 100.0f;
+    uint32_t phase = 0;
+    const uint32_t frames_total = rate * seconds;
+
+    for (uint32_t done = 0; done < frames_total; done += frames_per_chunk) {
+        for (uint32_t i = 0; i < frames_per_chunk; i++) {
+            const float t = (float)phase / (float)rate;
+            const int16_t v =
+                (int16_t)(amplitude * sinf(2.0f * (float)M_PI * (float)hz * t));
+            buf[i * 2]     = v;
+            buf[i * 2 + 1] = v;
+            /* Wrap on a whole second so the phase stays continuous and the
+             * float keeps its precision over a long tone. */
+            if (++phase >= rate) {
+                phase = 0;
+            }
+        }
+        rc = esp_codec_dev_write(s_spk->codec_dev, buf,
+                                 (int)(frames_per_chunk * 2u * sizeof(int16_t)));
+        if (rc != 0) {
+            ESP_LOGE(TAG, "write failed: rc=%d", rc);
+            ret = ESP_FAIL;
+            goto cleanup;
+        }
+    }
+    ESP_LOGI(TAG, "tone done");
+
+cleanup:
+    free(buf);
+    esp_codec_dev_close(s_spk->codec_dev);
     return ret;
 }
 
@@ -393,6 +534,12 @@ esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
 esp_err_t mpx_audio_play_wav(const char *rel_path)
 {
     (void)rel_path;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t mpx_audio_play_tone(uint32_t hz, uint32_t seconds)
+{
+    (void)hz; (void)seconds;
     return ESP_ERR_NOT_SUPPORTED;
 }
 
