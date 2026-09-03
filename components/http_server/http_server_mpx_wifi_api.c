@@ -127,6 +127,9 @@ static esp_err_t wifi_status_handler(httpd_req_t *req)
     http_server_json_add_string(sta, "state", state);
     http_server_json_add_string(sta, "ssid", status.sta_ssid);
     http_server_json_add_string(sta, "ip", status.wifi_connected ? status.ip : "");
+    http_server_json_add_string(sta, "error",
+                                (status.wifi_connected || !status.sta_error)
+                                ? "" : status.sta_error);
 
     return http_server_send_json_response(req, resp);
 }

@@ -26,6 +26,12 @@ typedef struct {
      * state the user spends the most time looking at. */
     bool sta_configured;
     const char *sta_ssid;
+    /* Why the last station attempt ended, in words, or "" if it has not failed
+     * since boot. The radio associates happily with a wrong password and only
+     * fails at the 4-way handshake three seconds later, so "connecting" can
+     * persist forever with nothing on screen to say the password is wrong.
+     * This is what the setup screen needs to stop the user waiting. */
+    const char *sta_error;
 } http_server_wifi_status_t;
 
 typedef struct {

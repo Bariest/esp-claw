@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "esp_netif.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
 #include "wifi_manager.h"
 #include "time.h"
 #include "nvs_flash.h"
@@ -131,6 +133,71 @@ static void log_wifi_startup_config(const app_config_t *config)
              config->ap_ssid[0] ? config->ap_ssid : "(auto:mac-suffix)",
              (unsigned)strlen(config->ap_password),
              config->ap_behavior[0] ? config->ap_behavior : "keep");
+}
+
+/* ── Why the station link failed ───────────────────────────────────────────
+ *
+ * wifi_manager logs `reason=15` and retries. Nothing turns that number into
+ * something a person can act on, and 15 is by far the most common one:
+ * WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT, which in practice means the password is
+ * wrong. The radio associates regardless of the password -- association does
+ * not check it -- so the log shows a clean `auth -> assoc -> run` and only
+ * fails three seconds later at the handshake. Read quickly, that looks like a
+ * connection that keeps dropping rather than one that was never accepted.
+ *
+ * This handler is the cheapest thing that could work: store the code, and log
+ * a decoded line only when it changes, so a ten-second retry loop does not
+ * become a ten-second log loop. It runs on the system event task, so it must
+ * stay this small.
+ */
+static volatile int s_sta_reason;
+static const char *s_sta_error = "";
+
+static const char *main_wifi_reason_text(int reason)
+{
+    switch (reason) {
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            return "wrong password";
+        case WIFI_REASON_NO_AP_FOUND:
+            return "network not found";
+        case WIFI_REASON_AUTH_FAIL:
+        case WIFI_REASON_802_1X_AUTH_FAILED:
+            return "authentication rejected";
+        case WIFI_REASON_ASSOC_FAIL:
+        case WIFI_REASON_ASSOC_EXPIRE:
+        case WIFI_REASON_ASSOC_TOOMANY:
+            return "access point refused the connection";
+        case WIFI_REASON_BEACON_TIMEOUT:
+        case WIFI_REASON_AUTH_EXPIRE:
+            return "signal lost";
+        case WIFI_REASON_CONNECTION_FAIL:
+            return "could not connect";
+        default:
+            return "disconnected";
+    }
+}
+
+static void on_wifi_disconnected(void *arg, esp_event_base_t base,
+                                 int32_t event_id, void *event_data)
+{
+    (void)arg;
+    (void)base;
+    (void)event_id;
+
+    const wifi_event_sta_disconnected_t *ev =
+        (const wifi_event_sta_disconnected_t *)event_data;
+    if (!ev) {
+        return;
+    }
+
+    const int reason = ev->reason;
+    if (reason == s_sta_reason) {
+        return;
+    }
+    s_sta_reason = reason;
+    s_sta_error = main_wifi_reason_text(reason);
+    ESP_LOGW(TAG, "Wi-Fi station failed: %s (reason=%d)", s_sta_error, reason);
 }
 
 /* ── Network status, off the event task ────────────────────────────────────
@@ -373,6 +440,7 @@ static esp_err_t main_get_wifi_status(http_server_wifi_status_t *status)
      * have the setup screen showing a network the robot is not on. */
     status->sta_ssid = (wifi_status.sta_configured || wifi_status.sta_connected)
                        ? s_wifi.sta_ssid : "";
+    status->sta_error = wifi_status.sta_connected ? "" : s_sta_error;
     return ESP_OK;
 }
 
@@ -831,6 +899,9 @@ void app_main(void)
 #endif
         },
     }));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED,
+                                              on_wifi_disconnected, NULL));
+
     /* Before the callback is registered, so no event can find a half-built
      * worker. */
     if (main_net_status_start() != ESP_OK) {
