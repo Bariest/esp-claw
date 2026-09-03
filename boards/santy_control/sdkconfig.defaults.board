@@ -1,0 +1,41 @@
+# Santy Control: ESP32-S3-WROOM-1-N16R8.
+
+# 16 MB flash. CONFIG_ESPTOOLPY_FLASHSIZE picks partitions_16MB.csv, which is
+# the table with the 2904K `model` partition esp-sr needs.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# 8 MB octal PSRAM, same part as the MP4 board. Required, not optional: see
+# docs/voice.md and the note in AGENTS.md about XIP_FROM_PSRAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_MEMTEST=n
+
+# Console on UART0 via the CH340K.
+#
+# NOT USB-Serial-JTAG: IO19 and IO20 are the native USB pins and this board
+# wires them to the DRV8833 motor driver, so that peripheral is unusable here.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# The agent, the web UI, cap_display and the `selftest` command.
+CONFIG_MP4_ROBOT_ENABLE=y
+
+# No servo harness on this board -- see board_devices.yaml. Without this,
+# driver_board_init() would claim SPI3 and four chip-select GPIOs that belong
+# to the camera connector.
+CONFIG_MP4_ROBOT_SERVO_ENABLE=n
+
+# esp-sr stays off until Phase 4 of docs/voice-plan.md. It builds fine here
+# (the model partition exists), but it is a several-hundred-MB first build
+# and nothing uses it yet.
+CONFIG_MP4_VOICE_ENABLE=n
+
+# Display is present.
+CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=y
+
+# Camera connector is unpopulated for voice work.
+CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT=n

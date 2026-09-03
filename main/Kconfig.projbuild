@@ -103,6 +103,27 @@ menu "MP4 Robot"
             the AAD for the MPXE encrypted-skill key unwrap. Changing it
             makes every already-purchased skill fail to decrypt.
 
+    config MP4_ROBOT_SERVO_ENABLE
+        bool "Drive the SPI servo boards"
+        depends on MP4_ROBOT_ENABLE
+        default y
+        help
+            Bring up the four AT32F413 driver boards on SPI3 and start the
+            gait task.
+
+            Turn this off for a board that runs the agent, the display and
+            the voice stack but has no servo harness. driver_board_init()
+            then reports "servos disabled in this build" and everything
+            downstream degrades the way it already does when the boards do
+            not answer: mpx_robot_ready() is false, robot tools return
+            "robot not initialised", and selftest reports SKIP.
+
+            This is not only about tidiness. SPI3 and the four chip-select
+            lines (GPIO 15, 7, 4, 5 on the MP4 board) belong to other
+            peripherals on other boards -- on Santy Control they are camera
+            data lines -- so claiming them where there is no servo harness
+            drives pins that belong to something else.
+
     config MP4_VOICE_ENABLE
         bool "Offline voice: wake word and command recognition"
         depends on MP4_ROBOT_ENABLE

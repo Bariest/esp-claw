@@ -219,6 +219,15 @@ bool driver_board_is_ready(void)
 
 bool driver_board_init(void)
 {
+#if !CONFIG_MP4_ROBOT_SERVO_ENABLE
+    /* No servo harness on this board. Returning false here is the same path
+     * as "the boards did not answer", which robot_init() already handles: it
+     * skips the channel probe, does not start the gait task, and reports the
+     * robot as not initialised. s_bus_ready stays false, so every bus call
+     * below is a quiet no-op. */
+    ESP_LOGI(TAG, "servos disabled in this build (MP4_ROBOT_SERVO_ENABLE=n)");
+    return false;
+#else
     if (s_lock) {
         ESP_LOGW(TAG, "driver_board_init() called twice — ignoring");
         return true;
@@ -284,6 +293,7 @@ bool driver_board_init(void)
     ESP_LOGI(TAG, "driver board SPI%d init OK (4 boards, 12 servos, variant %d)",
              SPI_MASTER_ID + 1, SERVO_BOARD);
     return true;
+#endif  /* CONFIG_MP4_ROBOT_SERVO_ENABLE */
 }
 
 void driver_board_sync_write(const uint16_t pos[12], const uint16_t cur_mA[12])
