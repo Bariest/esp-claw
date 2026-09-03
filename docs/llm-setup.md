@@ -34,6 +34,46 @@ Calls draw on your existing Poe subscription points rather than separate
 billing, and the documented limit is 500 requests/minute — neither is a
 constraint for one robot.
 
+## Field by field, as the settings page labels them
+
+Half of these live under **LLM Advanced Options**, collapsed by default, which
+is why the important ones are easy to miss or to type into the wrong box.
+
+| Label on the page | What it wants | For Poe |
+|---|---|---|
+| API Key | the secret | `sk-poe-...` |
+| Model | provider's model id | `GPT-5.4` |
+| Max Tokens | a number | `8192` |
+| **Backend Type** | a *protocol*, not a model | `openai_compatible` |
+| Base URL | endpoint root, no path | `https://api.poe.com/v1` |
+| **Auth Type** | how to send the key | `bearer` |
+| Max Tokens Field | the *name* of the token parameter | `max_tokens` |
+| Timeout (ms) | a number | `120000` |
+| Supports tool calls | on/off | **on** |
+
+**Backend Type takes one of exactly two values**: `openai_compatible` or
+`anthropic_compatible`. Nothing else parses, and the failure surfaces in chat
+as `Unknown LLM backend type` -- which does not say what the valid values are,
+and does not say that a model name is not one of them. It is the wire protocol
+to speak, not the model to use; the model goes in Model.
+
+**Auth Type** is `bearer` for almost everything. It is not a place for the key.
+
+**Max Tokens Field** wants a parameter *name*, for APIs that call the thing
+something other than `max_tokens` -- put a number in it and requests are
+malformed. Empty is also fine.
+
+## The key does not choose the model
+
+On Poe the name you type when creating a key is only a label. One key reaches
+every public bot; the Model field is what selects between them. Naming keys
+after models and making a new one per model does nothing except leave more
+live secrets to look after.
+
+Model names are Poe bot names, capitalisation included, as they appear in the
+bot's URL: `poe.com/GPT-5.4` gives `GPT-5.4`. Private bots are not reachable
+through the API.
+
 ## The one setting that is easy to miss
 
 **`llm_supports_tools` defaults to `false`.** With it off the model can hold a
