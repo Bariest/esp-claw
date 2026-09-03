@@ -101,6 +101,15 @@ dependencies:
     - if: $CONFIG{MP4_ROBOT_ENABLE} == True
     path: ../components/mpx_selftest
 
+  # Microphone and speaker: recording, playback and the `audio` console
+  # command. Phase 1 of docs/voice-plan.md. Present whenever the board
+  # declares audio devices, and harmless when it does not -- every entry
+  # point returns ESP_ERR_NOT_SUPPORTED with no codec.
+  mpx_audio:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_audio
+
   # Acoustic front end, WakeNet and MultiNet. Large: it brings esp-dl and
   # esp-dsp with it, and the first build downloads several hundred MB.
   espressif/esp-sr:

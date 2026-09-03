@@ -42,6 +42,7 @@
 #include "cap_robot.h"
 #include "cap_mpx_skill.h"
 #include "mpx_selftest.h"
+#include "mpx_audio.h"
 /* cap_display is built for every MP4_ROBOT_ENABLE configuration, panel or no
  * panel -- see main/idf_component.yml. Do NOT put this include behind
  * CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT: the face calls below are guarded
@@ -856,6 +857,11 @@ void app_main(void)
         ESP_LOGW(TAG, "Robot init failed - continuing without servos");
     }
 
+    /* Microphone and speaker. Only looks up the board's codec handles, so it
+     * is cheap and cannot fail in a way worth reacting to: a board with no
+     * audio devices simply reports both as absent. */
+    mpx_audio_init();
+
     /* WAMR, the 74 host functions, and the hook table mpx_robot asks through.
      * Needs mpx_robot up first. Not fatal either: a device that cannot run
      * skills is still a usable robot. */
@@ -1046,6 +1052,7 @@ void app_main(void)
     register_wifi_command();
 #if CONFIG_MP4_ROBOT_ENABLE
     register_selftest_command();
+    register_audio_command();
 #endif
 
 #if APP_ENABLE_MEM_LOG

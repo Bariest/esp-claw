@@ -1,0 +1,390 @@
+/*
+ * SPDX-FileCopyrightText: 2026 MangDang
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "mpx_audio.h"
+
+#include "esp_log.h"
+
+static const char *TAG = "mpx_audio";
+
+/* The whole implementation is behind this.
+ *
+ * esp_codec_dev only exists in the build when the selected board declares an
+ * audio_codec device -- that is esp_board_manager's own `matches` rule, and
+ * idf_component.yml here repeats it. On a board without audio the headers are
+ * simply absent, so the code that uses them cannot be compiled at all, and
+ * the stubs at the bottom of this file stand in. */
+#if CONFIG_ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT
+
+#include <errno.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+
+#include "claw_paths.h"
+#include "dev_audio_codec.h"
+#include "esp_board_device.h"
+#include "esp_check.h"
+#include "esp_codec_dev.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+/* 4 KB of 16-bit frames. Big enough that the per-read overhead disappears,
+ * small enough to sit in PSRAM without anyone noticing. */
+#define AUDIO_CHUNK_BYTES   4096
+
+/* claw_paths.h publishes no maximum, so pick one. Deep enough for the data
+ * root plus a couple of directories, short enough that the buffer is not a
+ * meaningful stack cost. */
+#define AUDIO_PATH_MAX      192
+
+static dev_audio_codec_handles_t *s_mic;
+static dev_audio_codec_handles_t *s_spk;
+static int s_volume = 70;
+
+/* ── WAV ───────────────────────────────────────────────────────────────────
+ *
+ * Written by hand rather than pulled from a library: it is 44 bytes, it is
+ * the only container this layer needs, and a dependency here would be a
+ * dependency in every later phase too. */
+#pragma pack(push, 1)
+typedef struct {
+    char     riff[4];
+    uint32_t file_size;        /* everything after this field */
+    char     wave[4];
+    char     fmt[4];
+    uint32_t fmt_size;
+    uint16_t format;           /* 1 = PCM */
+    uint16_t channels;
+    uint32_t sample_rate;
+    uint32_t byte_rate;
+    uint16_t block_align;
+    uint16_t bits_per_sample;
+    char     data[4];
+    uint32_t data_size;
+} wav_header_t;
+#pragma pack(pop)
+
+static void wav_header_fill(wav_header_t *h, uint32_t rate, uint16_t channels,
+                            uint32_t data_bytes)
+{
+    memcpy(h->riff, "RIFF", 4);
+    memcpy(h->wave, "WAVE", 4);
+    memcpy(h->fmt,  "fmt ", 4);
+    memcpy(h->data, "data", 4);
+    h->fmt_size        = 16;
+    h->format          = 1;
+    h->channels        = channels;
+    h->sample_rate     = rate;
+    h->bits_per_sample = 16;
+    h->block_align     = (uint16_t)(channels * 2);
+    h->byte_rate       = rate * h->block_align;
+    h->data_size       = data_bytes;
+    h->file_size       = data_bytes + sizeof(wav_header_t) - 8;
+}
+
+/* ── helpers ─────────────────────────────────────────────────────────────── */
+
+/* Resolve a data-root-relative path and create its parent directories.
+ *
+ * mkdir() per component rather than a recursive helper, because FATFS has no
+ * mkdir -p and the paths here are two levels deep at most. EEXIST is success. */
+static esp_err_t audio_prepare_path(const char *rel, char *out, size_t out_size)
+{
+    ESP_RETURN_ON_FALSE(rel && rel[0], ESP_ERR_INVALID_ARG, TAG, "empty path");
+    ESP_RETURN_ON_FALSE(!strstr(rel, ".."), ESP_ERR_INVALID_ARG, TAG, "path escapes root");
+    ESP_RETURN_ON_ERROR(claw_paths_join(CLAW_PATH_DATA, rel, out, out_size),
+                        TAG, "path too long");
+
+    for (char *slash = strchr(out + 1, '/'); slash; slash = strchr(slash + 1, '/')) {
+        *slash = '\0';
+        if (mkdir(out, 0777) != 0 && errno != EEXIST) {
+            ESP_LOGW(TAG, "mkdir %s failed: %s", out, strerror(errno));
+        }
+        *slash = '/';
+    }
+    return ESP_OK;
+}
+
+static void *audio_alloc(size_t size)
+{
+    /* PSRAM first: these buffers are large and nothing DMAs straight out of
+     * them -- esp_codec_dev copies through the I2S driver either way -- and
+     * internal RAM is the scarce resource on this firmware. */
+    void *p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return p ? p : heap_caps_malloc(size, MALLOC_CAP_DEFAULT);
+}
+
+/* ── init ────────────────────────────────────────────────────────────────── */
+
+esp_err_t mpx_audio_init(void)
+{
+    void *handle = NULL;
+
+    if (esp_board_device_get_handle("audio_adc", &handle) == ESP_OK && handle) {
+        s_mic = (dev_audio_codec_handles_t *)handle;
+    }
+    handle = NULL;
+    if (esp_board_device_get_handle("audio_dac", &handle) == ESP_OK && handle) {
+        s_spk = (dev_audio_codec_handles_t *)handle;
+    }
+
+    ESP_LOGI(TAG, "microphone %s, speaker %s",
+             mpx_audio_have_mic() ? "ready" : "absent",
+             mpx_audio_have_speaker() ? "ready" : "absent");
+    return ESP_OK;
+}
+
+bool mpx_audio_have_mic(void)     { return s_mic && s_mic->codec_dev; }
+bool mpx_audio_have_speaker(void) { return s_spk && s_spk->codec_dev; }
+
+void mpx_audio_set_volume(int percent)
+{
+    s_volume = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+}
+
+int mpx_audio_get_volume(void) { return s_volume; }
+
+/* ── record ──────────────────────────────────────────────────────────────── */
+
+esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
+                               uint32_t sample_rate, uint8_t channels,
+                               uint8_t pick)
+{
+    char full[AUDIO_PATH_MAX];
+    wav_header_t header = {0};
+    uint8_t *chunk = NULL;
+    int16_t *mono = NULL;
+    FILE *f = NULL;
+    esp_err_t ret = ESP_OK;
+    uint32_t written_bytes = 0;
+    int rc;
+
+    ESP_RETURN_ON_FALSE(mpx_audio_have_mic(), ESP_ERR_NOT_SUPPORTED, TAG,
+                        "no microphone on this board");
+    ESP_RETURN_ON_FALSE(channels >= 1 && channels <= 4, ESP_ERR_INVALID_ARG,
+                        TAG, "channels must be 1-4");
+    ESP_RETURN_ON_FALSE(pick < channels, ESP_ERR_INVALID_ARG, TAG,
+                        "pick must be below channels");
+    ESP_RETURN_ON_ERROR(audio_prepare_path(rel_path, full, sizeof(full)), TAG, "bad path");
+
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel         = channels,
+        .channel_mask    = 0,          /* 0 means "give me all of them" */
+        .sample_rate     = sample_rate,
+        .mclk_multiple   = 0,          /* 0 means 256x, which is what the board wires */
+    };
+
+    rc = esp_codec_dev_open(s_mic->codec_dev, &fs);
+    if (rc != 0) {
+        /* Not necessarily fatal for the user: the ES7210 is in TDM and the
+         * I2S slot config may not agree with the channel count asked for.
+         * Saying so beats a bare error code, because the fix is to pass a
+         * different channel count on the command line. */
+        ESP_LOGE(TAG, "codec open failed (rc=%d) at %" PRIu32 " Hz, %u channel(s)",
+                 rc, sample_rate, (unsigned)channels);
+        ESP_LOGE(TAG, "try a different channel count: `audio rec 5 0 2`");
+        return ESP_FAIL;
+    }
+
+    chunk = audio_alloc(AUDIO_CHUNK_BYTES);
+    mono  = audio_alloc(AUDIO_CHUNK_BYTES / channels);
+    ESP_GOTO_ON_FALSE(chunk && mono, ESP_ERR_NO_MEM, cleanup, TAG, "out of memory");
+
+    f = fopen(full, "wb");
+    ESP_GOTO_ON_FALSE(f, ESP_FAIL, cleanup, TAG, "cannot write %s", full);
+
+    /* Header first with a zero length, patched once the size is known. */
+    wav_header_fill(&header, sample_rate, 1, 0);
+    ESP_GOTO_ON_FALSE(fwrite(&header, 1, sizeof(header), f) == sizeof(header),
+                      ESP_FAIL, cleanup, TAG, "header write failed");
+
+    const uint32_t frames_per_chunk = AUDIO_CHUNK_BYTES / (channels * 2u);
+    const uint32_t frames_total     = sample_rate * seconds;
+
+    ESP_LOGI(TAG, "recording %" PRIu32 " s at %" PRIu32 " Hz, %u channel(s), keeping channel %u",
+             seconds, sample_rate, (unsigned)channels, (unsigned)pick);
+
+    for (uint32_t done = 0; done < frames_total; done += frames_per_chunk) {
+        rc = esp_codec_dev_read(s_mic->codec_dev, chunk, AUDIO_CHUNK_BYTES);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "read failed: rc=%d", rc);
+            ret = ESP_FAIL;
+            goto cleanup;
+        }
+
+        /* De-interleave: keep one channel out of every frame. */
+        const int16_t *src = (const int16_t *)chunk;
+        for (uint32_t i = 0; i < frames_per_chunk; i++) {
+            mono[i] = src[i * channels + pick];
+        }
+
+        const size_t bytes = frames_per_chunk * sizeof(int16_t);
+        if (fwrite(mono, 1, bytes, f) != bytes) {
+            ESP_LOGE(TAG, "short write -- storage full?");
+            ret = ESP_FAIL;
+            goto cleanup;
+        }
+        written_bytes += (uint32_t)bytes;
+    }
+
+    /* Patch the two length fields now that the size is known. */
+    wav_header_fill(&header, sample_rate, 1, written_bytes);
+    if (fseek(f, 0, SEEK_SET) != 0 ||
+            fwrite(&header, 1, sizeof(header), f) != sizeof(header)) {
+        ESP_LOGE(TAG, "could not patch WAV header");
+        ret = ESP_FAIL;
+        goto cleanup;
+    }
+
+    ESP_LOGI(TAG, "wrote %s (%" PRIu32 " bytes)", full, written_bytes);
+    ESP_LOGI(TAG, "download it: http://<robot-ip>/files/%s", rel_path);
+
+cleanup:
+    if (f) {
+        fclose(f);
+    }
+    free(chunk);
+    free(mono);
+    esp_codec_dev_close(s_mic->codec_dev);
+    return ret;
+}
+
+/* ── play ────────────────────────────────────────────────────────────────── */
+
+esp_err_t mpx_audio_play_wav(const char *rel_path)
+{
+    char full[AUDIO_PATH_MAX];
+    wav_header_t header = {0};
+    int16_t *file_buf = NULL;
+    int16_t *out_buf = NULL;
+    FILE *f = NULL;
+    esp_err_t ret = ESP_OK;
+    int rc;
+
+    ESP_RETURN_ON_FALSE(mpx_audio_have_speaker(), ESP_ERR_NOT_SUPPORTED, TAG,
+                        "no speaker on this board");
+    ESP_RETURN_ON_ERROR(audio_prepare_path(rel_path, full, sizeof(full)), TAG, "bad path");
+
+    f = fopen(full, "rb");
+    ESP_RETURN_ON_FALSE(f, ESP_ERR_NOT_FOUND, TAG, "cannot open %s", full);
+
+    if (fread(&header, 1, sizeof(header), f) != sizeof(header) ||
+            memcmp(header.riff, "RIFF", 4) != 0 ||
+            memcmp(header.wave, "WAVE", 4) != 0) {
+        fclose(f);
+        ESP_LOGE(TAG, "%s is not a WAV file", full);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (header.format != 1 || header.bits_per_sample != 16 ||
+            header.channels < 1 || header.channels > 2) {
+        fclose(f);
+        ESP_LOGE(TAG, "need 16-bit PCM, 1 or 2 channels; got format=%u bits=%u ch=%u",
+                 header.format, header.bits_per_sample, header.channels);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* The amplifier takes two I2S slots regardless of what the file holds, so
+     * a mono file is written to both. */
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel         = 2,
+        .channel_mask    = 0,
+        .sample_rate     = header.sample_rate,
+        .mclk_multiple   = 0,
+    };
+
+    rc = esp_codec_dev_open(s_spk->codec_dev, &fs);
+    if (rc != 0) {
+        fclose(f);
+        ESP_LOGE(TAG, "codec open failed: rc=%d", rc);
+        return ESP_FAIL;
+    }
+
+    const uint32_t frames_per_chunk = AUDIO_CHUNK_BYTES / 4u;   /* stereo out */
+    file_buf = audio_alloc(frames_per_chunk * header.channels * sizeof(int16_t));
+    out_buf  = audio_alloc(frames_per_chunk * 2u * sizeof(int16_t));
+    ESP_GOTO_ON_FALSE(file_buf && out_buf, ESP_ERR_NO_MEM, cleanup, TAG, "out of memory");
+
+    ESP_LOGI(TAG, "playing %s: %" PRIu32 " Hz, %u channel(s), volume %d%%",
+             full, header.sample_rate, header.channels, s_volume);
+
+    for (;;) {
+        const size_t want = frames_per_chunk * header.channels;
+        const size_t got = fread(file_buf, sizeof(int16_t), want, f);
+        if (got == 0) {
+            break;
+        }
+        const size_t frames = got / header.channels;
+
+        for (size_t i = 0; i < frames; i++) {
+            const int32_t l = file_buf[i * header.channels];
+            const int32_t r = (header.channels == 2) ? file_buf[i * 2 + 1] : l;
+            /* Volume in the samples: the MAX98357A cannot do it in hardware.
+             * int32 intermediate because a full-scale sample times 100 does
+             * not fit in 16 bits. */
+            out_buf[i * 2]     = (int16_t)(l * s_volume / 100);
+            out_buf[i * 2 + 1] = (int16_t)(r * s_volume / 100);
+        }
+
+        rc = esp_codec_dev_write(s_spk->codec_dev, out_buf,
+                                 (int)(frames * 2u * sizeof(int16_t)));
+        if (rc != 0) {
+            ESP_LOGE(TAG, "write failed: rc=%d", rc);
+            ret = ESP_FAIL;
+            goto cleanup;
+        }
+        if (got < want) {
+            break;                      /* short read means end of file */
+        }
+    }
+    ESP_LOGI(TAG, "playback done");
+
+cleanup:
+    if (f) {
+        fclose(f);
+    }
+    free(file_buf);
+    free(out_buf);
+    esp_codec_dev_close(s_spk->codec_dev);
+    return ret;
+}
+
+#else  /* CONFIG_ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT */
+
+/* No audio codec on this board. Everything answers honestly rather than
+ * failing to link, so `audio info` still works and says why. */
+
+esp_err_t mpx_audio_init(void)
+{
+    ESP_LOGI(TAG, "no audio codec on this board");
+    return ESP_OK;
+}
+
+bool mpx_audio_have_mic(void)     { return false; }
+bool mpx_audio_have_speaker(void) { return false; }
+
+esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
+                               uint32_t sample_rate, uint8_t channels,
+                               uint8_t pick)
+{
+    (void)rel_path; (void)seconds; (void)sample_rate; (void)channels; (void)pick;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t mpx_audio_play_wav(const char *rel_path)
+{
+    (void)rel_path;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+static int s_volume_stub = 70;
+void mpx_audio_set_volume(int percent) { s_volume_stub = percent; }
+int  mpx_audio_get_volume(void)        { return s_volume_stub; }
+
+#endif  /* CONFIG_ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT */
