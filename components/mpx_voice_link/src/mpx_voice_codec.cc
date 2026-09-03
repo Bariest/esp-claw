@@ -110,31 +110,24 @@ extern "C" int mpx_voice_decode(const uint8_t *packet, size_t len,
 
 /* ── loopback ──────────────────────────────────────────────────────────────
  *
- * Encode and decode at the SAME rate here, which is not what the protocol
- * does -- uplink is 16 kHz and downlink 24 kHz. Matching them means the
- * decoded frame can go straight to the speaker at the rate it was captured,
- * so this tests the codec without also needing a resampler. Getting the two
- * rates right is the socket's job, in the next phase.
+ * Record first, play afterwards. NOT both at once.
+ *
+ * The obvious version -- capture a frame, encode it, decode it, play it,
+ * repeat -- is an acoustic feedback loop. The microphone and the speaker are
+ * centimetres apart on the same board, the microphone has 30 dB of gain, and
+ * there is no echo cancellation until Phase 4. It howls up to full scale
+ * within a fraction of a second, which is unpleasant, tells you nothing about
+ * the codec, and on this board pulled the 5 V rail down hard enough to drop
+ * the USB serial connection.
+ *
+ * So: capture the whole clip through Opus into a buffer, stop the microphone,
+ * and only then play it. Nothing is listening while the speaker is on, and
+ * the test still proves encode and decode end to end by ear.
+ *
+ * Encode and decode run at the SAME rate here, which the protocol does not --
+ * uplink is 16 kHz, downlink 24 kHz. Matching them avoids needing a resampler
+ * to test the codec. Rate conversion is the socket's job, in Phase 2b.
  */
-/* Opus needs about 26 KB of stack.
- *
- * The reference firmware gives its codec task 2048 * 13 = 26624 bytes
- * (audio_service.cc, "opus_codec"), and that is not padding: celt's pitch
- * analysis puts large temporaries on the stack, so celt_pitch_xcorr runs off
- * the end of anything smaller. Running an encode on the console REPL task,
- * which has a few kilobytes, crashes with
- *
- *     Guru Meditation Error: Core 0 panic'ed (LoadStoreError)
- *     xcorr_kernel_c at .../celt/pitch.h:84
- *     Backtrace: ... |<-CORRUPTED
- *
- * -- a fault inside Opus with a corrupted backtrace, which reads like a bug
- * in the library rather than the caller giving it nowhere to stand.
- *
- * So anything that encodes or decodes runs on a task sized for it. This one
- * is transient: it exists for the length of the loopback and then exits, so
- * the 28 KB comes back. A permanent codec task arrives with the socket in
- * Phase 2b. */
 #define MPX_VOICE_TASK_STACK  (2048 * 14)
 
 namespace {
@@ -217,22 +210,31 @@ esp_err_t loopback_body(uint32_t seconds)
 
     ESP_RETURN_ON_ERROR(mpx_voice_codec_start(rate, rate), TAG, "codec start failed");
 
+    const uint32_t total_frames = (seconds * 1000u) / MPX_VOICE_FRAME_MS;
+    const size_t   total_samples = total_frames * frame;
+
+    /* The decoded clip, held whole so playback happens after capture. 8 s of
+     * 16 kHz mono is 256 KB -- far too much for internal RAM, and nothing
+     * here DMAs out of it, so PSRAM is the right home. */
+    int16_t *clip = (int16_t *)heap_caps_malloc(total_samples * sizeof(int16_t),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(clip, ESP_ERR_NO_MEM, TAG,
+                        "no room for a %" PRIu32 " s clip", seconds);
+
     std::vector<int16_t> pcm(frame);
     std::vector<int16_t> back(frame * 2);
     std::vector<uint8_t> packet(MPX_VOICE_PACKET_MAX);
+    size_t filled = 0;
 
-    ESP_RETURN_ON_ERROR(mpx_audio_capture_start(rate, 2, 0), TAG, "capture start failed");
-    ret = mpx_audio_output_start(rate);
+    ret = mpx_audio_capture_start(rate, 2, 0);
     if (ret != ESP_OK) {
-        mpx_audio_capture_stop();
+        free(clip);
         return ret;
     }
 
-    ESP_LOGI(TAG, "loopback for %" PRIu32 " s -- speak, and you should hear yourself",
-             seconds);
+    ESP_LOGI(TAG, "recording %" PRIu32 " s through Opus -- speak now", seconds);
 
-    const uint32_t total = (seconds * 1000u) / MPX_VOICE_FRAME_MS;
-    for (uint32_t i = 0; i < total; i++) {
+    for (uint32_t i = 0; i < total_frames; i++) {
         ret = mpx_audio_capture_read(pcm.data(), frame);
         if (ret != ESP_OK) {
             break;
@@ -254,25 +256,39 @@ esp_err_t loopback_body(uint32_t seconds)
             ret = ESP_FAIL;
             break;
         }
-
-        ret = mpx_audio_output_write(back.data(), (size_t)got);
-        if (ret != ESP_OK) {
-            break;
+        if (filled + (size_t)got <= total_samples) {
+            memcpy(clip + filled, back.data(), (size_t)got * sizeof(int16_t));
+            filled += (size_t)got;
         }
     }
 
-    mpx_audio_output_stop();
+    /* Microphone off BEFORE the speaker comes on. This ordering is the whole
+     * point of the exercise. */
     mpx_audio_capture_stop();
 
     if (packets) {
-        /* Bitrate is the number worth seeing: a 60 ms frame at a sane rate is
-         * roughly 150-400 bytes, so about 20-50 kbit/s. Wildly smaller means
-         * the encoder is being fed silence. */
         ESP_LOGI(TAG, "%" PRIu32 " packets, %" PRIu32 " bytes, average %" PRIu32
                       " B/frame, about %" PRIu32 " kbit/s",
                  packets, bytes, bytes / packets,
                  (bytes * 8u) / (packets * MPX_VOICE_FRAME_MS));
     }
+
+    if (ret == ESP_OK && filled) {
+        ESP_LOGI(TAG, "playing it back (%u samples)", (unsigned)filled);
+        ret = mpx_audio_output_start(rate);
+        if (ret == ESP_OK) {
+            for (size_t off = 0; off < filled; off += MPX_AUDIO_MAX_FRAMES) {
+                const size_t n = (filled - off < MPX_AUDIO_MAX_FRAMES)
+                                 ? (filled - off) : MPX_AUDIO_MAX_FRAMES;
+                if (mpx_audio_output_write(clip + off, n) != ESP_OK) {
+                    break;
+                }
+            }
+            mpx_audio_output_stop();
+        }
+    }
+
+    free(clip);
     return ret;
 }
 
