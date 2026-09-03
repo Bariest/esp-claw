@@ -269,6 +269,40 @@ bool cap_display_available(void)
     return s_session != NULL;
 }
 
+esp_err_t cap_display_service_start(void)
+{
+    /* Start the display service ourselves, before anything else opens a
+     * session, purely to choose the draw-buffer height.
+     *
+     * display_service_start() takes the buffer height from the FIRST caller
+     * and ignores every later one -- it returns ESP_OK immediately once
+     * started. system_ui opens a session with a NULL config during
+     * app_claw_ui_start(), which lands on the upstream default of 40 lines,
+     * and by the time cap_display opens its own session the size is fixed.
+     * So this has to run first or not at all.
+     *
+     * Why it matters: with PSRAM enabled, display_service selects the "SPI
+     * with PSRAM" profile, the draw buffer lives in external RAM, and
+     * spi_master has to bounce every flush through an internal DMA buffer of
+     * the same size. 40 lines is 25 KB of internal RAM churned several times
+     * a second; on a board with little to spare that allocation fails and
+     * every flush is dropped. */
+    const display_service_config_t cfg = {
+        .buffer_lines = CONFIG_MP4_DISPLAY_BUFFER_LINES,
+    };
+
+    const esp_err_t err = display_service_start(&cfg);
+    if (err != ESP_OK) {
+        /* Not fatal: a board with no panel reports one of these, and the
+         * face already treats "no display" as a normal configuration. */
+        ESP_LOGI(TAG, "display service not started: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "display service started, draw buffer %d lines",
+             (int)CONFIG_MP4_DISPLAY_BUFFER_LINES);
+    return ESP_OK;
+}
+
 esp_err_t cap_display_face_start(void)
 {
     esp_err_t err = ensure_session();

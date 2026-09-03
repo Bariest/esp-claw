@@ -103,6 +103,38 @@ menu "MP4 Robot"
             the AAD for the MPXE encrypted-skill key unwrap. Changing it
             makes every already-purchased skill fail to decrypt.
 
+    config MP4_DISPLAY_BUFFER_LINES
+        int "LVGL draw buffer height, in scan lines"
+        depends on ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
+        range 4 240
+        default 16
+        help
+            How many scan lines LVGL renders before handing them to the panel.
+
+            This is a memory setting, not a speed one. With CONFIG_SPIRAM on,
+            display_service picks the "SPI with PSRAM" profile, so the draw
+            buffer lives in external RAM -- and SPI DMA cannot read it
+            directly. spi_master therefore allocates an internal bounce
+            buffer the size of each transfer, copies into it, and frees it
+            again, on every flush.
+
+            At the upstream default of 40 lines that bounce buffer is
+            40 x 320 x 2 = 25600 bytes of internal DMA memory, requested and
+            released several times a second. On a board where internal RAM is
+            already tight it fails, and the panel fills the log with
+
+                spi_master: setup_dma_priv_buffer(): Failed to allocate priv TX buffer
+                lcd_panel.st7789: io tx color failed
+                esp_lvgl:bridge_v9: Draw bitmap failed: ESP_ERR_NO_MEM
+
+            while still showing whatever was drawn before memory ran out --
+            so the screen looks fine and the log says otherwise.
+
+            16 lines is 10240 bytes, which fits comfortably and costs only
+            more flushes per frame. Raise it if the panel feels slow and
+            there is internal RAM to spare; lower it if allocation still
+            fails.
+
     config MP4_ROBOT_SERVO_ENABLE
         bool "Drive the SPI servo boards"
         depends on MP4_ROBOT_ENABLE

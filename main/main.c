@@ -869,6 +869,18 @@ void app_main(void)
     main_log_heap("boot");
     ESP_ERROR_CHECK(wifi_manager_init());
 
+#if CONFIG_MP4_ROBOT_ENABLE
+    /* Before app_claw_ui_start(), not after.
+     *
+     * system_ui opens a display session with a NULL config, and whichever
+     * caller starts the display service first fixes the LVGL draw-buffer
+     * height for every later one. Starting it here is the only way to choose
+     * that size without editing the submodule. See
+     * CONFIG_MP4_DISPLAY_BUFFER_LINES for why the default is not good enough
+     * on a board with PSRAM. */
+    (void)cap_display_service_start();
+#endif
+
     /* Also non-fatal, for the same reason: on a board whose panel failed to
      * initialise above, this is where a display-less build would otherwise
      * abort. Without a UI the agent still runs and the web UI still serves. */

@@ -25,6 +25,14 @@ esp_err_t cap_display_register_group(void);
  * doing work whose only purpose is to put something on the panel. */
 bool cap_display_available(void);
 
+/* Bring the display service up with this project's draw-buffer height.
+ *
+ * Must be called BEFORE app_claw_ui_start(), because the first caller of
+ * display_service_start() fixes the buffer size for everyone. Safe to call on
+ * a board with no panel: it logs and returns the error, which callers ignore.
+ */
+esp_err_t cap_display_service_start(void);
+
 esp_err_t cap_display_face_start(void);
 
 /** @brief Update the dim line under the eyes.
