@@ -20,6 +20,11 @@ esp_err_t cap_display_register_group(void);
  *  operated on it and holding the panel costs nothing.
  *
  *  A board with no display is not an error; this returns ESP_OK. */
+/* True when a panel was found and a display session is open. False on a board
+ * with no screen, where every display call is a no-op -- check this before
+ * doing work whose only purpose is to put something on the panel. */
+bool cap_display_available(void);
+
 esp_err_t cap_display_face_start(void);
 
 /** @brief Update the dim line under the eyes.

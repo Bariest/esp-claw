@@ -264,6 +264,11 @@ esp_err_t cap_display_show_test_pattern(uint32_t hold_ms)
 
 /* ── Boot ──────────────────────────────────────────────────────────────── */
 
+bool cap_display_available(void)
+{
+    return s_session != NULL;
+}
+
 esp_err_t cap_display_face_start(void)
 {
     esp_err_t err = ensure_session();
@@ -305,6 +310,15 @@ esp_err_t cap_display_face_start(void)
 void cap_display_face_set_network(bool sta_connected, const char *ap_ssid, const char *ip)
 {
     char line[64];
+
+    /* Nothing to draw on, so do not reach for the lock. display_service_lock()
+     * logs an ESP_LOGE from esp_lv_adapter every time it is called without a
+     * panel, and this runs on every Wi-Fi state change -- so a display-less
+     * board printed a red error line next to each one, which looks like a
+     * fault and is just this board not having a screen. */
+    if (!cap_display_available()) {
+        return;
+    }
 
     /* What someone standing in front of the robot needs, in the order they
      * need it: before joining, the AP name; after, the address to type. */

@@ -241,10 +241,22 @@ static void main_apply_net_status(const main_net_status_t *st)
 {
     const char *ap_ssid = st->ap_active && st->ap_ssid[0] ? st->ap_ssid : NULL;
 
-    ESP_LOGI(TAG, "Wi-Fi state: sta_connected=%d ap_active=%d mode=%s ap_ssid=%s",
-             st->connected, st->ap_active,
+    /* The station IP is in this line because it is the single most-wanted
+     * value on the console -- it is what you type into a browser and what
+     * mpx-cli --ip wants -- and without it "sta_connected=1" reads as an
+     * unfinished connection. IDF prints it once, on a line from
+     * esp_netif_handlers that is easy to miss in a busy log. */
+    ESP_LOGI(TAG, "Wi-Fi state: sta_connected=%d ip=%s ap_active=%d mode=%s ap_ssid=%s",
+             st->connected,
+             st->connected && st->sta_ip[0] ? st->sta_ip : "(none)",
+             st->ap_active,
              st->mode[0] ? st->mode : "off",
              ap_ssid ? ap_ssid : "(none)");
+
+    if (st->connected && st->sta_ip[0]) {
+        ESP_LOGW(TAG, "*** Robot on the network: http://%s/  (mpx-cli --ip %s) ***",
+                 st->sta_ip, st->sta_ip);
+    }
 
     esp_err_t err = app_claw_set_network_status(st->connected, ap_ssid);
     if (err != ESP_OK) {
