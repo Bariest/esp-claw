@@ -166,6 +166,18 @@ DATA may live on flash or an SD card depending on the board.
 - Device names are load-bearing: `display_lcd`, `lcd_touch`, `audio_dac`,
   `audio_adc`, `imu_sensor`, `magnetometer_sensor`, `fs_sdcard`,
   `lcd_brightness`.
+- **A board with a `display_lcd` device also needs a `setup_device.c` in its
+  board folder**, defining `lcd_panel_factory_entry_t`.
+  `dev_display_lcd_sub_spi.c` declares that symbol `extern` and leaves the
+  board to supply it -- so a board that only has YAML files builds every
+  object file and then dies at the final link with
+
+      undefined reference to `lcd_panel_factory_entry_t'
+
+  Nothing in the YAML suggests a C file is required, and the error names a
+  file inside `managed_components/`, so it reads like a broken dependency
+  rather than a missing board file. Copy `boards/mp4_esp32_core/setup_device.c`
+  and change the panel constructor.
 
 ## This board, specifically
 
