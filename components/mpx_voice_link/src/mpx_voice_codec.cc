@@ -12,6 +12,9 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "mpx_audio.h"
 #include "opus_decoder.h"
 #include "opus_encoder.h"
@@ -111,7 +114,72 @@ extern "C" int mpx_voice_decode(const uint8_t *packet, size_t len,
  * so this tests the codec without also needing a resampler. Getting the two
  * rates right is the socket's job, in the next phase.
  */
+/* Opus needs about 26 KB of stack.
+ *
+ * The reference firmware gives its codec task 2048 * 13 = 26624 bytes
+ * (audio_service.cc, "opus_codec"), and that is not padding: celt's pitch
+ * analysis puts large temporaries on the stack, so celt_pitch_xcorr runs off
+ * the end of anything smaller. Running an encode on the console REPL task,
+ * which has a few kilobytes, crashes with
+ *
+ *     Guru Meditation Error: Core 0 panic'ed (LoadStoreError)
+ *     xcorr_kernel_c at .../celt/pitch.h:84
+ *     Backtrace: ... |<-CORRUPTED
+ *
+ * -- a fault inside Opus with a corrupted backtrace, which reads like a bug
+ * in the library rather than the caller giving it nowhere to stand.
+ *
+ * So anything that encodes or decodes runs on a task sized for it. This one
+ * is transient: it exists for the length of the loopback and then exits, so
+ * the 28 KB comes back. A permanent codec task arrives with the socket in
+ * Phase 2b. */
+#define MPX_VOICE_TASK_STACK  (2048 * 14)
+
+namespace {
+
+struct LoopbackArgs {
+    uint32_t seconds;
+    esp_err_t result;
+    SemaphoreHandle_t done;
+};
+
+esp_err_t loopback_body(uint32_t seconds);
+
+void loopback_task(void *arg)
+{
+    LoopbackArgs *args = (LoopbackArgs *)arg;
+    args->result = loopback_body(args->seconds);
+    xSemaphoreGive(args->done);
+    vTaskDelete(nullptr);
+}
+
+}  // namespace
+
 extern "C" esp_err_t mpx_voice_loopback(uint32_t seconds)
+{
+    LoopbackArgs args = { seconds, ESP_FAIL, nullptr };
+
+    args.done = xSemaphoreCreateBinary();
+    ESP_RETURN_ON_FALSE(args.done, ESP_ERR_NO_MEM, TAG, "no memory for semaphore");
+
+    if (xTaskCreate(loopback_task, "opus_loop", MPX_VOICE_TASK_STACK,
+                    &args, 5, nullptr) != pdPASS) {
+        vSemaphoreDelete(args.done);
+        ESP_LOGE(TAG, "could not create the codec task -- %d bytes of stack is "
+                      "more than the internal heap has left", MPX_VOICE_TASK_STACK);
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Wait for it rather than returning immediately, so the console prompt
+     * comes back when the loopback is actually finished. */
+    xSemaphoreTake(args.done, portMAX_DELAY);
+    vSemaphoreDelete(args.done);
+    return args.result;
+}
+
+namespace {
+
+esp_err_t loopback_body(uint32_t seconds)
 {
     const uint32_t rate = MPX_VOICE_UPLINK_RATE;
     const size_t frame = MPX_VOICE_UPLINK_FRAME;
@@ -179,3 +247,5 @@ extern "C" esp_err_t mpx_voice_loopback(uint32_t seconds)
     }
     return ret;
 }
+
+}  // namespace
