@@ -35,6 +35,7 @@ static void audio_usage(void)
            "  audio tone [hz] [secs]           play a generated sine -- speaker test\n"
            "  audio play [path]                play a 16-bit WAV from the data root\n"
            "  audio vol [0-100]                software output volume\n"
+           "  audio gain [0-60]                microphone gain in dB (default 30)\n"
            "\n"
            "Recording keeps ONE channel out of `chans`, chosen by `pick`, so the\n"
            "microphones can be told apart. On the ES7210 boards the channel order\n"
@@ -65,6 +66,7 @@ static int audio_cmd(int argc, char **argv)
         printf("  microphone : %s\n", mpx_audio_have_mic() ? "present" : "absent");
         printf("  speaker    : %s\n", mpx_audio_have_speaker() ? "present" : "absent");
         printf("  volume     : %d%%\n", mpx_audio_get_volume());
+        printf("  mic gain   : %d dB\n", mpx_audio_get_mic_gain());
         return 0;
     }
 
@@ -86,6 +88,14 @@ static int audio_cmd(int argc, char **argv)
             ESP_LOGE(TAG, "record failed: %s", esp_err_to_name(err));
             return 1;
         }
+        return 0;
+    }
+
+    if (strcmp(argv[1], "gain") == 0) {
+        if (argc >= 3) {
+            mpx_audio_set_mic_gain(atoi(argv[2]));
+        }
+        printf("  mic gain %d dB\n", mpx_audio_get_mic_gain());
         return 0;
     }
 

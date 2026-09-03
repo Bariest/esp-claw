@@ -66,6 +66,10 @@ esp_err_t mpx_audio_play_tone(uint32_t hz, uint32_t seconds);
 void mpx_audio_set_volume(int percent);
 int  mpx_audio_get_volume(void);
 
+/* Microphone gain in dB, 0-60, applied on the next recording. */
+void mpx_audio_set_mic_gain(int db);
+int  mpx_audio_get_mic_gain(void);
+
 /* Console command: audio rec|play|vol|info */
 void register_audio_command(void);
 

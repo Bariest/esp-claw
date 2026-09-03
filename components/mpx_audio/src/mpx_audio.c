@@ -49,6 +49,19 @@ static dev_audio_codec_handles_t *s_mic;
 static i2s_chan_handle_t s_tx;
 static int s_volume = 70;
 
+/* Microphone gain in dB, applied AFTER the codec is opened.
+ *
+ * 30 dB is what the reference firmware for this board uses
+ * (AUDIO_CODEC_DEFAULT_MIC_GAIN in SantaTest). Without it the ES7210 runs at
+ * its reset default and a normal speaking voice records at a peak of a couple
+ * of thousand out of 32767 -- present, but far too quiet to hear on playback,
+ * which is easy to mistake for a broken speaker.
+ *
+ * `adc_init_gain: 30` in board_devices.yaml does NOT do this. That value
+ * lands in the board manager's own config struct; esp_codec_dev never reads
+ * it, and nothing logs that the gain was left alone. */
+static float s_mic_gain_db = 30.0f;
+
 /* ── Output goes straight to I2S, with no codec in between ─────────────────
  *
  * The MAX98357A has no control interface: no I2C, no registers, nothing to
@@ -246,6 +259,13 @@ void mpx_audio_set_volume(int percent)
     s_volume = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
 }
 
+void mpx_audio_set_mic_gain(int db)
+{
+    s_mic_gain_db = (float)(db < 0 ? 0 : (db > 60 ? 60 : db));
+}
+
+int mpx_audio_get_mic_gain(void) { return (int)s_mic_gain_db; }
+
 int mpx_audio_get_volume(void) { return s_volume; }
 
 /* ── record ──────────────────────────────────────────────────────────────── */
@@ -330,8 +350,22 @@ esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
     const uint32_t frames_per_chunk = AUDIO_CHUNK_BYTES / (channels * 2u);
     const uint32_t frames_total     = sample_rate * seconds;
 
-    ESP_LOGI(TAG, "recording %" PRIu32 " s at %" PRIu32 " Hz, %u channel(s), keeping channel %u",
-             seconds, sample_rate, (unsigned)channels, (unsigned)pick);
+    /* Gain must be set after open: before that the codec is unconfigured and
+     * there is nothing to write the register to. */
+    rc = esp_codec_dev_set_in_channel_gain(s_mic->codec_dev, fs.channel_mask,
+                                           s_mic_gain_db);
+    if (rc != 0) {
+        rc = esp_codec_dev_set_in_gain(s_mic->codec_dev, s_mic_gain_db);
+    }
+    if (rc != 0) {
+        ESP_LOGW(TAG, "could not set microphone gain (rc=%d); recording will "
+                      "be quiet", rc);
+    }
+
+    ESP_LOGI(TAG, "recording %" PRIu32 " s at %" PRIu32 " Hz, %u channel(s), "
+                  "keeping channel %u, gain %d dB",
+             seconds, sample_rate, (unsigned)channels, (unsigned)pick,
+             (int)s_mic_gain_db);
 
     for (uint32_t done = 0; done < frames_total; done += frames_per_chunk) {
         rc = esp_codec_dev_read(s_mic->codec_dev, chunk, AUDIO_CHUNK_BYTES);
@@ -582,5 +616,9 @@ esp_err_t mpx_audio_play_tone(uint32_t hz, uint32_t seconds)
 static int s_volume_stub = 70;
 void mpx_audio_set_volume(int percent) { s_volume_stub = percent; }
 int  mpx_audio_get_volume(void)        { return s_volume_stub; }
+
+static int s_gain_stub = 30;
+void mpx_audio_set_mic_gain(int db) { s_gain_stub = db; }
+int  mpx_audio_get_mic_gain(void)   { return s_gain_stub; }
 
 #endif  /* CONFIG_ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT */
