@@ -122,12 +122,23 @@ menu "MP4 Robot"
     config MP4_GATEWAY_HOST
         string "Skill marketplace gateway host"
         depends on MP4_ROBOT_ENABLE
-        default ""
+        default "35.220.215.160"
         help
-            Host or IP of the skill marketplace gateway that /v1/marketplace/*
-            is proxied to. Leave empty (or set to "echo") to build a robot with
-            no marketplace: those routes then answer 503 and the PWA's Store
-            screen stays empty instead of hanging on a host that is not there.
+            Host or IP of the skill marketplace gateway that the
+            /v1/marketplace endpoints are proxied to.
+
+            The default is the same gateway the mangdang firmware uses -- it
+            reaches it through CONFIG_APP_CHAT_SERVER_IP, which is why the two
+            builds behaved differently until this default was filled in.
+
+            Leave empty (or set to "echo") to build a robot with no
+            marketplace: those routes then answer 503 with "no marketplace
+            gateway is configured on this robot", and the PWA's Store screen
+            stays empty instead of hanging on a host that is not there.
+
+            Note this is plain HTTP on port 8080, with no TLS -- inherited
+            from the original firmware. Marketplace traffic, including
+            whatever mpx-cli auth sends, is readable on the wire.
 
     config MP4_GATEWAY_PORT
         int "Skill marketplace gateway port"
