@@ -6,3 +6,9 @@
 ## that expects exactly the framing this library produces.
 dependencies:
   78/esp-opus-encoder: "~2.4.0"
+
+  ## Already in the build via ESP-Claw's cap_im_platform, but declared here
+  ## too: relying on another component's dependency means this one breaks
+  ## the day that component is disabled, for reasons that would take a while
+  ## to trace back.
+  espressif/esp_websocket_client: "^1.4.0"

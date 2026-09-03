@@ -11,8 +11,15 @@ idf_component_register(
         mpx_audio
         console
         json
-        esp_websocket_client
-        esp_wifi
+        esp_hw_support
+        # Managed components are named <namespace>__<name> once they are in
+        # the build, so the plain registry name does not resolve:
+        #
+        #     Failed to resolve component 'esp_websocket_client'
+        #     required by component 'mpx_voice_link': unknown name
+        #
+        # Same convention as 78__esp-opus above.
+        espressif__esp_websocket_client
         # 78__esp-opus is NOT redundant.
         #
         # 78/esp-opus-encoder keeps 78/esp-opus in its PRIVATE requirements,
