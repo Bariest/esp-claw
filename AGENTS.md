@@ -181,6 +181,23 @@ Five things that are not obvious and have already cost time once:
 `boards/mp4_esp32_core/README.md` has the full pin table and the list of values
 that still need confirming on hardware.
 
+## -Werror=comment
+
+A `/*` inside a block comment is a **build failure**, not a warning. This has
+broken the build three times, always while documenting a URI pattern or a
+glob. The message points at the comment rather than at anything wrong with the
+code, so it reads like a spurious diagnostic and gets skimmed past.
+
+Write the pair in prose ("a slash followed by an asterisk") or in a string
+literal, never inside a comment. Before committing:
+
+    python tools/check_comments.py
+
+It walks every `.c`/`.h`/`.cc` outside `build/`, `third-party/` and
+`managed_components/` as a character stream -- tracking string and char
+literals so it does not false-positive on real code -- and exits non-zero with
+file:line for each offence.
+
 ## Silent boot loop: read this before debugging anything else
 
 Symptom: the terminal repeats the ROM banner (`ESP-ROM:esp32s3-...`, `load:`,

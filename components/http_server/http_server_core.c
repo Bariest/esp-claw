@@ -145,18 +145,21 @@ esp_err_t http_server_start(void)
 #endif
     /* ── ADD NOTHING BELOW THIS LINE ──────────────────────────────────────
      *
-     * http_server_register_mpx_web_routes() registers a "/*" catch-all, and
-     * this server is configured with httpd_uri_match_wildcard (see
-     * config.uri_match_fn above). That match function is used for TWO things:
-     * dispatching a request, and the duplicate check inside
-     * httpd_register_uri_handler().
+     * http_server_register_mpx_web_routes() registers a catch-all whose URI is
+     * a slash followed by an asterisk -- not written literally anywhere in a
+     * block comment in this file, because that pair ends the comment and
+     * -Werror=comment rejects it. This server is configured with
+     * httpd_uri_match_wildcard (see config.uri_match_fn above), and that
+     * match function is used for TWO things: dispatching a request, and the
+     * duplicate check inside httpd_register_uri_handler().
      *
-     * So once "/*" is registered, registering ANY later GET route asks httpd
-     * "does an existing entry match this URI?", "/*" answers yes, and the
-     * registration is refused with ESP_ERR_HTTPD_HANDLER_EXISTS -- reported as
-     * `handler /v1/... with method 1 already registered`, which reads like a
-     * genuine duplicate and is not one. http_server_start() then returns an
-     * error and app_main aborts.
+     * So once the catch-all is registered, registering ANY later GET route
+     * asks httpd "does an existing entry match this URI?", the catch-all
+     * answers yes, and the registration is refused with
+     * ESP_ERR_HTTPD_HANDLER_EXISTS -- reported as `handler /v1/... with
+     * method 1 already registered`, which reads like a genuine duplicate and
+     * is not one. http_server_start() then returns an error, and app_main
+     * aborts if the caller checks it.
      *
      * POST routes survive, because the catch-all is GET-only. That is why the
      * symptom was two dead endpoints (/v1/lua/list and /v1/lua/read) out of
