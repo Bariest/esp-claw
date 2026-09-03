@@ -1,10 +1,42 @@
 # Generic ESP32-S3 devkit: ESP-Claw, the web UI and the agent, with none of
 # the MP4 hardware.
 
-# Assume the common devkit: 8 MB flash, no PSRAM guarantee. Override if yours
-# differs -- CONFIG_ESPTOOLPY_FLASHSIZE picks the partition table.
+# 8 MB flash. Safe on a 16 MB module too -- it simply uses less of it, and
+# CONFIG_ESPTOOLPY_FLASHSIZE is what picks the partition table.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# ---- PSRAM ------------------------------------------------------------
+#
+# Required, not an optimisation. ESP-Claw's scheduler, event router, Lua VM
+# and agent buffers all expect external RAM; without it app_claw_start()
+# returns ESP_ERR_NO_MEM long before the ~512 KB of internal SRAM is actually
+# exhausted, because what runs out first is one contiguous block.
+#
+# Octal, because that is what the 8 MB modules use: WROOM-1 N8R8 and N16R8 are
+# ...R8 = 8 MB octal. The 2 MB ...R2 parts are quad. Guessing the mode wrong
+# is not a build error -- the module simply is not found at boot.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_MEMTEST=n
+
+# Boot anyway if no PSRAM answers, so a different devkit degrades to a warning
+# instead of a panic -- which is the whole point of this board file.
+#
+# The three settings below are turned OFF to make that possible. Each one
+# places something at a fixed address in PSRAM (.bss, .noinit, and cached
+# flash code respectively), and IGNORE_NOTFOUND cannot rescue a boot that has
+# already put static data somewhere that does not exist. They are enabled in
+# the project-wide sdkconfig.defaults for the MP4 board, which always has its
+# PSRAM; this board overrides them.
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=n
+CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY=n
+CONFIG_SPIRAM_XIP_FROM_PSRAM=n
 
 # Kept on so the `selftest` console command is built. Its robot checks report
 # nothing found, which is the correct answer here; mpx_robot_init() failing is
