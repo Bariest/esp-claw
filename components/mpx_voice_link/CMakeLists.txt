@@ -9,4 +9,21 @@ idf_component_register(
     REQUIRES
         mpx_audio
         console
+        # 78__esp-opus is NOT redundant.
+        #
+        # 78/esp-opus-encoder keeps 78/esp-opus in its PRIVATE requirements,
+        # so opus.h is on that component's own include path and nobody
+        # else's. Its public header opus_decoder.h then does
+        # `#include "opus.h"`, and any component that includes it fails with
+        #
+        #     fatal error: opus.h: No such file or directory
+        #
+        # The reference firmware never hits this because it uses the wrappers
+        # from `main`, which implicitly requires every component in the
+        # build. A separate component has to ask.
+        #
+        # Requiring it here rather than editing the managed component: files
+        # under managed_components/ are re-downloaded and would silently lose
+        # the change.
+        78__esp-opus
 )
