@@ -12,7 +12,9 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mpx_audio.h"
@@ -150,7 +152,9 @@ void loopback_task(void *arg)
     LoopbackArgs *args = (LoopbackArgs *)arg;
     args->result = loopback_body(args->seconds);
     xSemaphoreGive(args->done);
-    vTaskDelete(nullptr);
+    /* Created with xTaskCreateWithCaps, so it must be destroyed with the
+     * matching call -- the plain vTaskDelete would leak the stack. */
+    vTaskDeleteWithCaps(nullptr);
 }
 
 }  // namespace
@@ -162,11 +166,35 @@ extern "C" esp_err_t mpx_voice_loopback(uint32_t seconds)
     args.done = xSemaphoreCreateBinary();
     ESP_RETURN_ON_FALSE(args.done, ESP_ERR_NO_MEM, TAG, "no memory for semaphore");
 
-    if (xTaskCreate(loopback_task, "opus_loop", MPX_VOICE_TASK_STACK,
-                    &args, 5, nullptr) != pdPASS) {
+    /* Stack in PSRAM.
+     *
+     * 28 KB contiguous is more than internal RAM has spare on this firmware --
+     * the measured largest free block is around 63 KB at boot and much less
+     * once Wi-Fi, the web server and the agent are running, so this failed
+     * outright with ESP_ERR_NO_MEM.
+     *
+     * External RAM is the normal answer here rather than a workaround:
+     * ESP-Claw already puts task stacks there by default
+     * (claw_task_memory_caps returns MALLOC_CAP_SPIRAM for every policy but
+     * INTERNAL_ONLY), and CONFIG_SPIRAM_XIP_FROM_PSRAM is on, which is what
+     * makes a PSRAM stack safe around flash access. See the note in
+     * AGENTS.md -- that setting is load-bearing, and this is one of the
+     * things leaning on it.
+     *
+     * Internal is the fallback for a build without PSRAM, where Opus would be
+     * the least of the problems. */
+    BaseType_t ok = xTaskCreateWithCaps(loopback_task, "opus_loop",
+                                        MPX_VOICE_TASK_STACK, &args, 5, nullptr,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ok != pdPASS) {
+        ok = xTaskCreateWithCaps(loopback_task, "opus_loop",
+                                 MPX_VOICE_TASK_STACK, &args, 5, nullptr,
+                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (ok != pdPASS) {
         vSemaphoreDelete(args.done);
-        ESP_LOGE(TAG, "could not create the codec task -- %d bytes of stack is "
-                      "more than the internal heap has left", MPX_VOICE_TASK_STACK);
+        ESP_LOGE(TAG, "could not create the codec task: %d bytes of stack is "
+                      "more than either heap has left", MPX_VOICE_TASK_STACK);
         return ESP_ERR_NO_MEM;
     }
 
