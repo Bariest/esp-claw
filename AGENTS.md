@@ -230,6 +230,22 @@ Two consequences:
   request, so it is the one task guaranteed to hit flash. That fix stands on
   its own and does not depend on the XIP setting -- which is the point.
 
+## Internal compiler error in esp_lcd_panel_rgb.c: just build again
+
+    during RTL pass: ira
+    esp_lcd_panel_rgb.c: In function 'rgb_panel_draw_bitmap':
+    internal compiler error: Segmentation fault
+
+This is GCC crashing, not a problem with the code -- and the file is
+ESP-IDF's, not ours. It has happened twice in this project, both times on
+that same function, and both times a plain re-run of `idf.py build` compiled
+it without complaint.
+
+Non-deterministic, most likely memory pressure during a wide parallel build.
+Re-run first. If the same file fails twice more, `idf.py build -j 4` narrows
+the parallelism and clears it. Do not go looking for a cause in whatever was
+changed just before it -- the timing is coincidence.
+
 ## -Werror=comment
 
 A `/*` inside a block comment is a **build failure**, not a warning. This has
