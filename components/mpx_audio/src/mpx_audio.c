@@ -27,6 +27,8 @@ static const char *TAG = "mpx_audio";
 
 #include "claw_paths.h"
 #include "dev_audio_codec.h"
+#include "driver/i2s_std.h"
+#include "esp_board_periph.h"
 #include "esp_board_device.h"
 #include "esp_check.h"
 #include "esp_codec_dev.h"
@@ -44,8 +46,68 @@ static const char *TAG = "mpx_audio";
 #define AUDIO_PATH_MAX      192
 
 static dev_audio_codec_handles_t *s_mic;
-static dev_audio_codec_handles_t *s_spk;
+static i2s_chan_handle_t s_tx;
 static int s_volume = 70;
+
+/* ── Output goes straight to I2S, with no codec in between ─────────────────
+ *
+ * The MAX98357A has no control interface: no I2C, no registers, nothing to
+ * configure. esp_codec_dev's "dummy" codec exists to represent exactly that,
+ * and going through it produced a TX path that clocked data out for the right
+ * length of time and made no sound, while logging
+ *
+ *     i2s_channel_disable(): the channel has not been enabled yet
+ *
+ * on every open -- the channel's enable state was not what the driver
+ * believed. Rather than keep guessing at that, this follows the firmware
+ * already proven on this board (SantaTest's santa_audio_codec.cc), which
+ * creates no output codec device at all and calls i2s_channel_write()
+ * directly. There is genuinely nothing for a codec layer to do here.
+ *
+ * The board manager hands out the TX channel handle already enabled, so this
+ * only reconfigures the sample rate when it differs from the board default. */
+static esp_err_t audio_out_open(uint32_t rate)
+{
+    if (!s_tx) {
+        void *handle = NULL;
+        if (esp_board_periph_get_handle("i2s_audio_out", &handle) != ESP_OK || !handle) {
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        s_tx = (i2s_chan_handle_t)handle;
+    }
+
+    /* Reconfiguring requires the channel to be stopped. It may already be
+     * stopped, and that is not an error worth reporting. */
+    (void)i2s_channel_disable(s_tx);
+
+    i2s_std_clk_config_t clk = I2S_STD_CLK_DEFAULT_CONFIG(rate);
+    clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    ESP_RETURN_ON_ERROR(i2s_channel_reconfig_std_clock(s_tx, &clk), TAG,
+                        "cannot set %" PRIu32 " Hz", rate);
+
+    /* Philips framing, 16-bit, both slots -- what the amplifier expects and
+     * what the working firmware sends. */
+    i2s_std_slot_config_t slot =
+        I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                            I2S_SLOT_MODE_STEREO);
+    ESP_RETURN_ON_ERROR(i2s_channel_reconfig_std_slot(s_tx, &slot), TAG,
+                        "cannot set slot format");
+
+    return i2s_channel_enable(s_tx);
+}
+
+static esp_err_t audio_out_write(const void *buf, size_t bytes)
+{
+    size_t written = 0;
+    return i2s_channel_write(s_tx, buf, bytes, &written, portMAX_DELAY);
+}
+
+static void audio_out_close(void)
+{
+    if (s_tx) {
+        (void)i2s_channel_disable(s_tx);
+    }
+}
 
 /* ── WAV ───────────────────────────────────────────────────────────────────
  *
@@ -153,8 +215,8 @@ esp_err_t mpx_audio_init(void)
         s_mic = (dev_audio_codec_handles_t *)handle;
     }
     handle = NULL;
-    if (esp_board_device_get_handle("audio_dac", &handle) == ESP_OK && handle) {
-        s_spk = (dev_audio_codec_handles_t *)handle;
+    if (esp_board_periph_get_handle("i2s_audio_out", &handle) == ESP_OK && handle) {
+        s_tx = (i2s_chan_handle_t)handle;
     }
 
     ESP_LOGI(TAG, "microphone %s, speaker %s",
@@ -177,7 +239,7 @@ esp_err_t mpx_audio_init(void)
 }
 
 bool mpx_audio_have_mic(void)     { return s_mic && s_mic->codec_dev; }
-bool mpx_audio_have_speaker(void) { return s_spk && s_spk->codec_dev; }
+bool mpx_audio_have_speaker(void) { return s_tx != NULL; }
 
 void mpx_audio_set_volume(int percent)
 {
@@ -346,26 +408,13 @@ esp_err_t mpx_audio_play_tone(uint32_t hz, uint32_t seconds)
     const uint32_t rate = 16000;
     int16_t *buf = NULL;
     esp_err_t ret = ESP_OK;
-    int rc;
 
     ESP_RETURN_ON_FALSE(mpx_audio_have_speaker(), ESP_ERR_NOT_SUPPORTED, TAG,
                         "no speaker on this board");
     ESP_RETURN_ON_FALSE(hz >= 20 && hz <= rate / 2, ESP_ERR_INVALID_ARG, TAG,
                         "frequency must be 20 Hz to %" PRIu32 " Hz", rate / 2);
 
-    esp_codec_dev_sample_info_t fs = {
-        .bits_per_sample = 16,
-        .channel         = 2,
-        .channel_mask    = 0,
-        .sample_rate     = rate,
-        .mclk_multiple   = 0,
-    };
-
-    rc = esp_codec_dev_open(s_spk->codec_dev, &fs);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "codec open failed: rc=%d", rc);
-        return ESP_FAIL;
-    }
+    ESP_RETURN_ON_ERROR(audio_out_open(rate), TAG, "cannot open I2S output");
 
     const uint32_t frames_per_chunk = AUDIO_CHUNK_BYTES / 4u;
     buf = audio_alloc(frames_per_chunk * 2u * sizeof(int16_t));
@@ -393,11 +442,9 @@ esp_err_t mpx_audio_play_tone(uint32_t hz, uint32_t seconds)
                 phase = 0;
             }
         }
-        rc = esp_codec_dev_write(s_spk->codec_dev, buf,
-                                 (int)(frames_per_chunk * 2u * sizeof(int16_t)));
-        if (rc != 0) {
-            ESP_LOGE(TAG, "write failed: rc=%d", rc);
-            ret = ESP_FAIL;
+        ret = audio_out_write(buf, frames_per_chunk * 2u * sizeof(int16_t));
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "i2s write failed: %s", esp_err_to_name(ret));
             goto cleanup;
         }
     }
@@ -405,7 +452,7 @@ esp_err_t mpx_audio_play_tone(uint32_t hz, uint32_t seconds)
 
 cleanup:
     free(buf);
-    esp_codec_dev_close(s_spk->codec_dev);
+    audio_out_close();
     return ret;
 }
 
@@ -419,7 +466,6 @@ esp_err_t mpx_audio_play_wav(const char *rel_path)
     int16_t *out_buf = NULL;
     FILE *f = NULL;
     esp_err_t ret = ESP_OK;
-    int rc;
 
     ESP_RETURN_ON_FALSE(mpx_audio_have_speaker(), ESP_ERR_NOT_SUPPORTED, TAG,
                         "no speaker on this board");
@@ -445,19 +491,11 @@ esp_err_t mpx_audio_play_wav(const char *rel_path)
 
     /* The amplifier takes two I2S slots regardless of what the file holds, so
      * a mono file is written to both. */
-    esp_codec_dev_sample_info_t fs = {
-        .bits_per_sample = 16,
-        .channel         = 2,
-        .channel_mask    = 0,
-        .sample_rate     = header.sample_rate,
-        .mclk_multiple   = 0,
-    };
-
-    rc = esp_codec_dev_open(s_spk->codec_dev, &fs);
-    if (rc != 0) {
+    ret = audio_out_open(header.sample_rate);
+    if (ret != ESP_OK) {
         fclose(f);
-        ESP_LOGE(TAG, "codec open failed: rc=%d", rc);
-        return ESP_FAIL;
+        ESP_LOGE(TAG, "cannot open I2S output: %s", esp_err_to_name(ret));
+        return ret;
     }
 
     const uint32_t frames_per_chunk = AUDIO_CHUNK_BYTES / 4u;   /* stereo out */
@@ -486,11 +524,9 @@ esp_err_t mpx_audio_play_wav(const char *rel_path)
             out_buf[i * 2 + 1] = (int16_t)(r * s_volume / 100);
         }
 
-        rc = esp_codec_dev_write(s_spk->codec_dev, out_buf,
-                                 (int)(frames * 2u * sizeof(int16_t)));
-        if (rc != 0) {
-            ESP_LOGE(TAG, "write failed: rc=%d", rc);
-            ret = ESP_FAIL;
+        ret = audio_out_write(out_buf, frames * 2u * sizeof(int16_t));
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "i2s write failed: %s", esp_err_to_name(ret));
             goto cleanup;
         }
         if (got < want) {
@@ -505,7 +541,7 @@ cleanup:
     }
     free(file_buf);
     free(out_buf);
-    esp_codec_dev_close(s_spk->codec_dev);
+    audio_out_close();
     return ret;
 }
 

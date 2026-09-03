@@ -13,6 +13,7 @@ idf_component_register(
         "include"
     REQUIRES
         esp_board_manager
+        esp_driver_i2s
         claw_core
         console
         vfs
