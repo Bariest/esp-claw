@@ -44,6 +44,13 @@
 #include "mpx_selftest.h"
 #include "mpx_audio.h"
 #include "mpx_voice_link.h"
+#include "mpx_mcp_ws.h"
+#if CONFIG_MP4_PI_LINK_ENABLE
+#include "mpx_pi_link.h"
+#endif
+#if CONFIG_MP4_VOICE_ENABLE
+#include "mpx_voice_wake.h"
+#endif
 /* cap_display is built for every MP4_ROBOT_ENABLE configuration, panel or no
  * panel -- see main/idf_component.yml. Do NOT put this include behind
  * CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT: the face calls below are guarded
@@ -1055,6 +1062,75 @@ void app_main(void)
     register_selftest_command();
     register_audio_command();
     register_voice_command();
+
+#if CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
+    /* Phase 5: the conversation on the face. mpx_voice_link reports what
+     * the server heard, says and feels; cap_display turns that into a
+     * subtitle under the eyes and an expression. Registered here rather
+     * than inside either component so neither has to know the other exists
+     * (cap_display is not even in the build on a board without a panel). */
+    {
+        static const mpx_voice_ui_hooks_t face_hooks = {
+            .heard         = cap_display_voice_heard,
+            .saying        = cap_display_voice_saying,
+            .emotion       = cap_display_voice_emotion,
+            .reply_done    = cap_display_voice_reply_done,
+            .session_ended = cap_display_voice_session_ended,
+        };
+        mpx_voice_set_ui_hooks(&face_hooks);
+    }
+#endif
+
+#if CONFIG_MP4_PI_LINK_ENABLE
+    /* UART1 to the Raspberry Pi on the J-PI header. Cheap to bring up (one
+     * small task, no RAM to speak of) and harmless with nothing plugged in,
+     * so it is on by default; `pi status` on the console is the check. */
+    if (mpx_pi_link_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Pi UART link did not start -- `pi` commands will fail");
+    }
+    register_pi_command();
+#endif
+
+    /* Phase 3 of docs/voice-plan.md: the MCP bridge. Started unconditionally
+     * here rather than from `voice connect` -- claw_cap's capabilities are
+     * already registered by this point (app_capabilities_register_external_group()
+     * ran ahead of app_claw_start(), earlier in this function), so there is
+     * nothing to wait on. Starting it now also means `mcp call ...` works
+     * from the console immediately, without a socket, which is the Phase 3
+     * gate that does not need STT working yet. */
+    if (mpx_mcp_ws_init() != ESP_OK) {
+        ESP_LOGW(TAG, "MCP bridge did not start -- `mcp` commands will fail");
+    }
+    register_mcp_command();
+
+#if CONFIG_MP4_VOICE_ENABLE
+    /* Phase 4 of docs/voice-plan.md (first cut): load esp-sr's models and
+     * build the AFE instance now, same reasoning as the MCP bridge above --
+     * claw_cap is already up, and doing it at boot means `wake start` works
+     * immediately rather than paying the model-load cost on the first use.
+     * This only builds the front end; whether it then takes the microphone
+     * is CONFIG_MP4_VOICE_AUTO_LISTEN's call, just below. */
+    if (mpx_voice_wake_init() != ESP_OK) {
+        ESP_LOGW(TAG, "wake word init did not complete -- `wake start` will fail");
+    }
+    /* The AFE is the last big consumer of internal RAM to come up, and the
+     * LCD's per-flush DMA bounce buffer (see cap_display_service_start) has
+     * to fit in whatever is left. Print it so the margin is visible in the
+     * boot log instead of showing up as "Draw bitmap failed: ESP_ERR_NO_MEM"
+     * a few hundred milliseconds later. */
+    main_log_heap("after wake init");
+    register_wake_command();
+#if CONFIG_MP4_VOICE_AUTO_LISTEN
+    /* Hands-free from here on: the front end takes the microphone and
+     * keeps it until `wake auto off`. Nothing network-related happens yet
+     * -- the socket is opened on the first wake word, by which time Wi-Fi
+     * has had every chance to come up -- so this cannot fail on a board
+     * that is still on its provisioning AP. */
+    if (mpx_voice_wake_auto_start() != ESP_OK) {
+        ESP_LOGW(TAG, "hands-free listening did not start -- `wake auto on` to retry");
+    }
+#endif
+#endif
 #endif
 
 #if APP_ENABLE_MEM_LOG

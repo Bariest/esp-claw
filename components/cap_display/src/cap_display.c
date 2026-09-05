@@ -25,6 +25,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -48,6 +49,7 @@
 
 #include "display_service.h"
 
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -62,6 +64,10 @@ static display_service_session_handle_t s_session;
 static lv_obj_t   *s_text_screen;
 static lv_obj_t   *s_label;
 static lv_timer_t *s_text_timer;
+
+/* The network line normally shown under the eyes; the conversation
+ * subtitles (further down) borrow the line and hand it back to this. */
+static char s_network_line[64] = "";
 
 /* ── The screen ────────────────────────────────────────────────────────── */
 
@@ -89,6 +95,39 @@ static esp_err_t ensure_session(void)
     return ESP_OK;
 }
 
+/* Put `screen` on the panel. Caller holds the LVGL lock.
+ *
+ * NOT display_service_session_load_screen_locked(). That call is only for
+ * sessions opened in DISPLAY_SERVICE_MODE_EXCLUSIVE_LVGL and refuses every
+ * other kind with "session is not exclusive LVGL" -- which is what this
+ * component used to hit on every call, so the face never came up at boot
+ * ("Face not started: ESP_ERR_INVALID_STATE") and display_show_text from
+ * the agent failed the same way while the log said the tool call arrived.
+ *
+ * This session is SHARED on purpose: an exclusive session would hold the
+ * panel's scene lock permanently, and lua_module_lvgl (the agent's own
+ * drawing) opens an exclusive session of its own, which would then fail.
+ * A shared client draws the way ESP-Claw's system_ui does it: check that
+ * nobody holds the panel exclusively, then lv_screen_load() under the lock
+ * (system_ui_load_screen_locked() is exactly this). When Lua does hold it,
+ * this refuses and the face comes back on its own when Lua releases --
+ * that is what registering the face as the default screen is for. */
+static esp_err_t load_screen_locked(lv_obj_t *screen)
+{
+    if (!screen) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!display_service_session_is_valid(s_session)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (display_service_has_exclusive_session()) {
+        /* Someone else -- a Lua drawing -- owns the panel right now. */
+        return ESP_ERR_INVALID_STATE;
+    }
+    lv_screen_load(screen);
+    return ESP_OK;
+}
+
 /* Put the face back on the panel. Caller holds the LVGL lock. */
 static esp_err_t show_face_locked(void)
 {
@@ -97,7 +136,7 @@ static esp_err_t show_face_locked(void)
     if (!face) {
         return ESP_ERR_NO_MEM;
     }
-    return display_service_session_load_screen_locked(s_session, face);
+    return load_screen_locked(face);
 }
 
 static void text_expired_cb(lv_timer_t *timer)
@@ -145,7 +184,7 @@ static esp_err_t paint_text(const char *text)
     }
 
     lv_label_set_text(s_label, text);
-    err = display_service_session_load_screen_locked(s_session, s_text_screen);
+    err = load_screen_locked(s_text_screen);
 
     if (s_text_timer) {
         lv_timer_reset(s_text_timer);
@@ -243,7 +282,7 @@ esp_err_t cap_display_show_test_pattern(uint32_t hold_ms)
         }
     }
 
-    err = display_service_session_load_screen_locked(s_session, screen);
+    err = load_screen_locked(screen);
     display_service_unlock();
     if (err != ESP_OK) {
         return err;
@@ -363,7 +402,154 @@ void cap_display_face_set_network(bool sta_connected, const char *ap_ssid, const
     } else {
         snprintf(line, sizeof(line), "no network");
     }
+    /* Remembered so the conversation subtitles below can hand the line back
+     * once the robot has been quiet for a while. */
+    snprintf(s_network_line, sizeof(s_network_line), "%s", line);
     (void)cap_display_face_set_status(line);
+}
+
+/* ── The conversation, on the face (Phase 5) ──────────────────────────────
+ *
+ * mpx_voice_link tells us what the server heard, what it is about to say,
+ * and which emotion it picked, through the hooks main.c registers with
+ * mpx_voice_set_ui_hooks(). Two things happen here:
+ *
+ *   the eyes take the emotion -- the server's names (xiaozhi's list, about
+ *   twenty of them) are folded onto the ten expressions the face can draw;
+ *
+ *   the dim line under the eyes becomes a subtitle -- "you: ..." for the
+ *   transcript, then each sentence of the reply as it starts. When the
+ *   reply is over and nothing else happens for a while, the line goes back
+ *   to the network address it normally shows, so the panel is still useful
+ *   to someone who walks up to the robot an hour later. The expression is
+ *   left as it is: a robot that just laughed should not snap back to
+ *   neutral on a timer.
+ *
+ * These run on the websocket task. cap_display_face_set_*() take the LVGL
+ * lock themselves; the only thing done here without it is the esp_timer,
+ * which is what makes the hand-back safe -- an lv_timer callback runs inside
+ * LVGL with the lock held, and would deadlock calling set_status().         */
+
+#define CAP_DISPLAY_VOICE_IDLE_MS   12000
+#define CAP_DISPLAY_SUBTITLE_MAX    96
+
+static esp_timer_handle_t s_voice_idle_timer;
+
+static const struct { const char *server; const char *face; } s_emotion_map[] = {
+    { "neutral",     "neutral"   },
+    { "happy",       "happy"     },
+    { "laughing",    "excited"   },
+    { "funny",       "happy"     },
+    { "silly",       "happy"     },
+    { "delicious",   "happy"     },
+    { "confident",   "happy"     },
+    { "cool",        "wink"      },
+    { "winking",     "wink"      },
+    { "relaxed",     "neutral"   },
+    { "thinking",    "confused"  },
+    { "confused",    "confused"  },
+    { "embarrassed", "confused"  },
+    { "sad",         "sad"       },
+    { "crying",      "sad"       },
+    { "angry",       "angry"     },
+    { "surprised",   "surprised" },
+    { "shocked",     "surprised" },
+    { "loving",      "love"      },
+    { "kissy",       "love"      },
+    { "sleepy",      "sleepy"    },
+};
+
+static void voice_idle_cb(void *arg)
+{
+    (void)arg;
+    (void)cap_display_face_set_status(s_network_line);
+}
+
+static void voice_idle_arm(bool arm)
+{
+    if (s_voice_idle_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = voice_idle_cb,
+            .name = "face_idle",
+        };
+        if (esp_timer_create(&args, &s_voice_idle_timer) != ESP_OK) {
+            return;
+        }
+    }
+    (void)esp_timer_stop(s_voice_idle_timer);
+    if (arm) {
+        (void)esp_timer_start_once(s_voice_idle_timer, (uint64_t)CAP_DISPLAY_VOICE_IDLE_MS * 1000);
+    }
+}
+
+static void voice_subtitle(const char *prefix, const char *text)
+{
+    char line[CAP_DISPLAY_SUBTITLE_MAX];
+
+    if (!cap_display_available() || !text) {
+        return;
+    }
+    /* The server's sentences arrive with their own leading newlines and
+     * spaces now and then; one line is all there is room for. */
+    while (*text == ' ' || *text == '\n' || *text == '\r') {
+        text++;
+    }
+    snprintf(line, sizeof(line), "%s%s", prefix ? prefix : "", text);
+    for (char *c = line; *c; c++) {
+        if (*c == '\n' || *c == '\r') {
+            *c = ' ';
+        }
+    }
+    voice_idle_arm(false);              /* a live conversation: keep the subtitle */
+    (void)cap_display_face_set_status(line);
+}
+
+void cap_display_voice_heard(const char *text)
+{
+    voice_subtitle("you: ", text);
+}
+
+void cap_display_voice_saying(const char *text)
+{
+    voice_subtitle(NULL, text);
+}
+
+void cap_display_voice_emotion(const char *name)
+{
+    const char *face = NULL;
+
+    if (!cap_display_available() || !name) {
+        return;
+    }
+    for (size_t i = 0; i < sizeof(s_emotion_map) / sizeof(s_emotion_map[0]); i++) {
+        if (strcasecmp(name, s_emotion_map[i].server) == 0) {
+            face = s_emotion_map[i].face;
+            break;
+        }
+    }
+    if (face == NULL) {
+        /* Not in the table: maybe it is already one of ours ("wink"). */
+        face = cap_display_face_is_emotion(name) ? name : "neutral";
+    }
+    (void)cap_display_face_set_emotion(face);
+}
+
+void cap_display_voice_reply_done(void)
+{
+    if (!cap_display_available()) {
+        return;
+    }
+    voice_idle_arm(true);
+}
+
+void cap_display_voice_session_ended(void)
+{
+    if (!cap_display_available()) {
+        return;
+    }
+    voice_idle_arm(false);
+    (void)cap_display_face_set_status(s_network_line);
+    (void)cap_display_face_set_emotion("neutral");
 }
 
 /* ── Tools ─────────────────────────────────────────────────────────────── */
@@ -396,8 +582,11 @@ static esp_err_t execute_show_text(const char *input_json,
     cJSON_Delete(root);
 
     if (paint_text(buf) != ESP_OK) {
-        snprintf(output, output_size,
-                 "Error: the display is not available on this device.");
+        /* Two different situations, and the agent should be told which:
+         * no panel at all, or a Lua drawing currently holding it. */
+        snprintf(output, output_size, cap_display_available()
+                 ? "Error: the display is busy (another drawing owns it right now)."
+                 : "Error: the display is not available on this device.");
         return ESP_ERR_INVALID_STATE;
     }
     snprintf(output, output_size, "{\"ok\":true,\"showing\":\"%s\"}", buf);
@@ -550,6 +739,84 @@ static esp_err_t execute_set_brightness(const char *input_json,
 #endif /* CAP_DISPLAY_HAS_LEDC */
 }
 
+/* "green", "#00ff00", "00FF00" or "0x00ff00" -> 0xRRGGBB; -1 if unreadable. */
+static int32_t parse_color(const char *text)
+{
+    static const struct { const char *name; uint32_t rgb; } named[] = {
+        { "black",  0x000000 }, { "white",  0xFFFFFF }, { "red",    0xFF0000 },
+        { "green",  0x00C000 }, { "blue",   0x0040FF }, { "yellow", 0xFFE631 },
+        { "orange", 0xFF8000 }, { "purple", 0x8000FF }, { "pink",   0xFF4D8D },
+        { "cyan",   0x00E0E0 }, { "grey",   0x808080 }, { "gray",   0x808080 },
+    };
+    if (!text || !text[0]) {
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
+        if (strcasecmp(text, named[i].name) == 0) {
+            return (int32_t)named[i].rgb;
+        }
+    }
+    if (text[0] == '#') {
+        text++;
+    } else if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        text += 2;
+    }
+    if (strlen(text) != 6) {
+        return -1;
+    }
+    char *end = NULL;
+    const long v = strtol(text, &end, 16);
+    return (end && *end == '\0') ? (int32_t)v : -1;
+}
+
+static esp_err_t execute_set_colors(const char *input_json,
+                                    const claw_cap_call_context_t *ctx,
+                                    char *output, size_t output_size)
+{
+    (void)ctx;
+    if (!input_json || !output || output_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    cJSON *root = cJSON_Parse(input_json);
+    if (!root) {
+        snprintf(output, output_size, "Error: input must be a JSON object");
+        return ESP_ERR_INVALID_ARG;
+    }
+    const cJSON *bg = cJSON_GetObjectItem(root, "background");
+    const cJSON *eyes = cJSON_GetObjectItem(root, "eyes");
+    const int32_t bg_rgb = cJSON_IsString(bg) ? parse_color(bg->valuestring) : -1;
+    const int32_t eye_rgb = cJSON_IsString(eyes) ? parse_color(eyes->valuestring) : -1;
+    const bool bg_bad = cJSON_IsString(bg) && bg->valuestring[0] && bg_rgb < 0;
+    const bool eye_bad = cJSON_IsString(eyes) && eyes->valuestring[0] && eye_rgb < 0;
+    cJSON_Delete(root);
+
+    if (bg_bad || eye_bad) {
+        snprintf(output, output_size,
+                 "Error: colours are a name (black, white, red, green, blue, yellow, "
+                 "orange, purple, pink, cyan, grey) or hex like #00ff00.");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (bg_rgb < 0 && eye_rgb < 0) {
+        snprintf(output, output_size, "Error: give 'background' and/or 'eyes'.");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (ensure_session() != ESP_OK || cap_display_face_set_colors(bg_rgb, eye_rgb) != ESP_OK) {
+        snprintf(output, output_size, "Error: the display is not available on this device.");
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* Make sure the face is what is on screen, so the change is visible. */
+    if (display_service_lock() == ESP_OK) {
+        if (s_text_timer) {
+            lv_timer_delete(s_text_timer);
+            s_text_timer = NULL;
+        }
+        (void)show_face_locked();
+        display_service_unlock();
+    }
+    snprintf(output, output_size, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 /* ── Descriptors ───────────────────────────────────────────────────────── */
 
 static const claw_cap_descriptor_t s_descriptors[] = {
@@ -558,9 +825,9 @@ static const claw_cap_descriptor_t s_descriptors[] = {
         .name = "display_show_text",
         .family = "display",
         .description =
-            "Show a short message on the robot's screen, centred and scaled to "
-            "fill it. Keep it to a few words - this is a 320x240 panel seen "
-            "from across a room, not a place to put a paragraph.",
+            "Show a short TEXT message on the robot's screen, a few words, big. "
+            "Text only: for a picture, drawing, shape or animation on the screen "
+            "use ask_robot_agent instead.",
         .kind = CLAW_CAP_KIND_CALLABLE,
         .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
         .input_schema_json =
@@ -575,8 +842,8 @@ static const claw_cap_descriptor_t s_descriptors[] = {
         .family = "display",
         .description =
             "Show a face on the robot's screen: neutral, happy, excited, sad, "
-            "sleepy, angry, surprised, love, confused or wink. Use it to give "
-            "the robot a reaction to what was said.",
+            "sleepy, angry, surprised, love, confused or wink. A reaction to what "
+            "was said. For pictures or drawings use ask_robot_agent instead.",
         .kind = CLAW_CAP_KIND_CALLABLE,
         .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
         .input_schema_json =
@@ -596,6 +863,25 @@ static const claw_cap_descriptor_t s_descriptors[] = {
         .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
         .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
         .execute = execute_clear,
+    },
+    {
+        .id = "display_set_colors",
+        .name = "display_set_colors",
+        .family = "display",
+        .description =
+            "Change the colours of the robot's face: the screen background "
+            "and/or the eyes. Use this when someone asks to make the screen or "
+            "background a colour, or to change the eye colour. Colour names "
+            "(black, white, red, green, blue, yellow, orange, purple, pink, "
+            "cyan, grey) or hex like #00ff00. The default is yellow eyes on "
+            "black.",
+        .kind = CLAW_CAP_KIND_CALLABLE,
+        .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
+        .input_schema_json =
+            "{\"type\":\"object\",\"properties\":{"
+            "\"background\":{\"type\":\"string\",\"description\":\"screen background colour\"},"
+            "\"eyes\":{\"type\":\"string\",\"description\":\"eye colour\"}}}",
+        .execute = execute_set_colors,
     },
     {
         .id = "display_set_brightness",

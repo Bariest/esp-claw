@@ -138,7 +138,11 @@ void mpx_robot_imu_read(mpx_robot_imu_t *out)
     const robot::ImuData d = robot::imu_read();
     out->ax = d.ax; out->ay = d.ay; out->az = d.az;
     out->gx = d.gx; out->gy = d.gy; out->gz = d.gz;
+    out->mx = d.mx; out->my = d.my; out->mz = d.mz;
+    out->mag_valid = d.mag_valid;
 }
+
+bool mpx_robot_mag_ready(void) { return robot::imu_mag_ready(); }
 
 int   mpx_robot_read_angle_cdeg(int s)   { return robot::read_angle_cdeg(s); }
 int   mpx_robot_read_position(int s)     { return robot::read_position(s); }

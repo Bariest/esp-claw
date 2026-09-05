@@ -9,6 +9,9 @@
 #include <string.h>
 
 #include "cap_im_local.h"
+#if CONFIG_MP4_ROBOT_ENABLE
+#include "mpx_mcp_ws.h"
+#endif
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -268,8 +271,10 @@ static esp_err_t webim_outbound_cb(const cap_im_local_message_t *message, void *
      * the PWA's chat socket is fed from here rather than by taking the slot
      * away. Both views are on the "web" channel and each delivers only to the
      * chat_id it is watching, so ESP-Claw's own UI and the PWA show the same
-     * conversation without seeing each other's. */
+     * conversation without seeing each other's. The MCP bridge is a third
+     * view, for the chat id its ask_robot_agent tool talks on. */
     http_server_mpx_chat_on_outbound(message);
+    mpx_mcp_ws_on_agent_reply(message->chat_id, message->text);
 #endif
     return webim_emit_outbound_json(message);
 }

@@ -12,6 +12,13 @@ idf_component_register(
         "src/stanford_gait.cc"
         "src/stanford_kinematics.cc"
         "src/mpx_imu.cc"
+        # Bosch's BMM150 driver, verbatim from the ESP-Claw submodule's
+        # lua_module_magnetometer (third-party/ is never edited in place).
+        # mpx_imu.cc drives it through the BMI270's aux master; the lua
+        # module's own backend is off in the board defaults
+        # (CONFIG_APP_CLAW_LUA_MODULE_MAGNETOMETER=n), and must stay off --
+        # both compiled in would be two copies of every bmm150_* symbol.
+        "src/bmm150/bmm150.c"
         "src/mpx_robot_c_api.cc"
     INCLUDE_DIRS
         # "src" is public, not private, and that is a deliberate exception.
@@ -24,6 +31,8 @@ idf_component_register(
         # skill runtime should still include only mpx_robot.h.
         "include"
         "src"
+    PRIV_INCLUDE_DIRS
+        "src/bmm150"
     REQUIRES
         esp_board_manager
     PRIV_REQUIRES

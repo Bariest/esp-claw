@@ -13,13 +13,13 @@ Source of truth: `MP4ESP32_CORE_SCH_0827.pdf` (Altium, 4 sheets, 2026-08-27).
 | Function | Schematic net | GPIO |
 |---|---|---|
 | I2C0 SDA / SCL | `IO1_I2C_SDA` / `IO2_I2C_SCL` | 1 / 2 |
-| LCD CS / DC / MOSI / SCK | `IO9_LCD_CS` / `IO39_LCD_DC` / `IO40_LCD_MOSI` / `IO41_LCD_SCK` | 9 / 39 / 40 / 41 |
+| LCD CS / DC / MOSI / SCK (SPI3) | `IO9_LCD_CS` / `IO39_LCD_DC` / `IO40_LCD_MOSI` / `IO41_LCD_SCK` | 9 / 39 / 40 / 41 |
 | LCD backlight | `IO42_LCD_BL` (via Q2 SI2301 P-FET) | 42 |
 | LCD reset | board `RESET` net | — |
 | I2S MCLK / BCLK / WS | `IO38_I2S_MCK` / `IO14_I2S_BCK` / `IO13_I2S_WS` | 38 / 14 / 13 |
 | I2S DIN (ES7210 → ESP) | `IO12_I2S_DI` | 12 |
 | I2S DOUT (ESP → MAX98357A) | `IO45_I2S_DO` | 45 |
-| Servo SPI MOSI / CLK / MISO | `IO6_SPI_MOSI` / `IO16_SPI_CLK` / `IO17_SPI_MISO` | 6 / 16 / 17 |
+| Servo SPI MOSI / CLK / MISO (SPI2 -- it has six CS lines, SPI3 only three) | `IO6_SPI_MOSI` / `IO16_SPI_CLK` / `IO17_SPI_MISO` | 6 / 16 / 17 |
 | Servo CS1..CS4 (CN3..CN6) | `IO15_SPI_CS1` / `IO7_SPI_CS2` / `IO4_SPI_CS3` / `IO5_SPI_CS4` | 15 / 7 / 4 / 5 |
 | IMU INT1 | `IO10_INT1` | 10 |
 | BOOT (SW2) / WAKE (SW3) | `IO0_BOOT` / `IO21_WAKE` | 0 / 21 |

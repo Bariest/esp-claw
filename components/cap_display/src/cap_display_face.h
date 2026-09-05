@@ -9,6 +9,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 #include "lvgl.h"
@@ -33,6 +34,11 @@ esp_err_t cap_display_face_set_emotion(const char *name);
 
 /** @brief Set the dim line under the eyes (network state). "" clears it. */
 esp_err_t cap_display_face_set_status(const char *text);
+
+/* Repaint the face: background and/or eye colour as 0xRRGGBB, or -1 to
+ * leave that one alone. The eye colour sticks until the next expression
+ * change brings that expression's own colour back. */
+esp_err_t cap_display_face_set_colors(int32_t background_rgb, int32_t eyes_rgb);
 
 #ifdef __cplusplus
 }

@@ -117,9 +117,48 @@ dependencies:
     - if: $CONFIG{MP4_ROBOT_ENABLE} == True
     path: ../components/mpx_voice_link
 
-  # Acoustic front end, WakeNet and MultiNet. Large: it brings esp-dl and
-  # esp-dsp with it, and the first build downloads several hundred MB.
+  # The MCP bridge: JSON-RPC tool calls over the xiaozhi socket, dispatched
+  # into claw_cap_call(). Phase 3 of docs/voice-plan.md.
+  mpx_mcp_ws:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_mcp_ws
+
+  # Raspberry Pi UART link (tools/pi/README.md). Gated on MP4_ROBOT_ENABLE like
+  # the rest of the robot stack; MP4_PI_LINK_ENABLE decides whether main.c
+  # actually opens the UART.
+  mpx_pi_link:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_pi_link
+
+  # Acoustic front end, WakeNet and VAD (MultiNet is not used: the cloud is
+  # the brain). Large: it brings esp-dl and esp-dsp with it, and the first
+  # build downloads several hundred MB.
+  #
+  # This is the only `rules:`-gated entry that is a *managed* component,
+  # and that needs care. `$CONFIG{...}` is evaluated from
+  # build/config/sdkconfig.json only, and on the first pass of every
+  # configure the component manager deliberately does not load that file:
+  # every rule here reads as false, esp-sr is left out, the manager exits 10
+  # and ESP-IDF's project.cmake runs idf_build_process() again with the
+  # generated config. For the `path:` entries above that first pass is
+  # harmless -- everything under ../components is auto-discovered anyway --
+  # but a component that hard-REQUIRES `espressif__esp-sr` in its
+  # CMakeLists.txt fails requirement expansion on that first pass, before
+  # the retry. So nothing may REQUIRE esp-sr directly; attach it with
+  # idf_component_optional_requires() after registration instead. See
+  # components/mpx_voice_wake/CMakeLists.txt.
   espressif/esp-sr:
     version: "^2.5.2"
     rules:
       - if: $CONFIG{MP4_VOICE_ENABLE} == True
+
+  # AEC + VAD + WakeNet over the microphone, wired to barge-in. Phase 4 of
+  # docs/voice-plan.md (first cut -- see the component's own header for what
+  # is and is not wired up yet).
+  mpx_voice_wake:
+    rules:
+    - if: $CONFIG{MP4_VOICE_ENABLE} == True
+    path: ../components/mpx_voice_wake
+

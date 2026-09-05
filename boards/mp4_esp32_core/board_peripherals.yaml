@@ -53,12 +53,23 @@ peripherals:
   # ST7789 TFT on connector J4 (AFC34-S10FIA, 10 pins).
   # Write-only 3-wire SPI: there is no MISO line on the connector.
   # Schematic nets: IO40_LCD_MOSI, IO41_LCD_SCK.
+  #
+  # SPI3, not SPI2 -- the hosts are swapped from the first bring-up on
+  # purpose. On the ESP32-S3, GP-SPI2 has six chip-select lines and GP-SPI3
+  # has three. The servo bus needs four (CN3..CN6); the display needs one.
+  # With the display here on SPI2 the fourth driver board failed to attach:
+  #
+  #   E DRVBOARD: spi_bus_add_device RL (CN6, GPIO5) failed: ESP_ERR_NO_MEM
+  #
+  # (that is how the driver reports "no free CS slot"). Both hosts are routed
+  # through the GPIO matrix on these pins either way, so nothing about speed
+  # or DMA changes; only the CS count does. driver_board.c has the other half.
   - name: spi_display
     type: spi
     role: master
     config:
       spi_bus_config:
-        spi_port: SPI2_HOST
+        spi_port: SPI3_HOST
         data0_io_num: 40              # MOSI / SDA
         sclk_io_num: 41               # SCK / SCL
         max_transfer_sz: 153600       # 320 * 240 * 2, a full frame

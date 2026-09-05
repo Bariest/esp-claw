@@ -168,14 +168,14 @@ devices:
   # through the BMI270 rather than around it. M5CoreS3IMU's bmi2auxClass is
   # a working example of exactly this arrangement.
   #
-  # DEFERRED ON PURPOSE until accel and gyro are confirmed on real hardware.
-  # Bosch's API wants accel, gyro and aux configured and enabled in ONE
-  # bmi2_set_sensor_config / bmi2_sensor_enable call, so bolting the
-  # magnetometer on means rewriting configure_sensor() in mpx_imu.cc -- and a
-  # mistake there takes the accelerometer and gyro down with it, turning one
-  # missing feature into three broken ones.
+  # DONE: components/mpx_robot/src/mpx_imu.cc, configure_magnetometer(),
+  # brings it up right after accel and gyro are confirmed running -- as a
+  # separate, optional step, so a BMM150 problem is logged and ignored rather
+  # than taking the accelerometer and gyro down with it. `imu watch` on the
+  # console shows the field and a tilt-compensated heading; `imu cal` does
+  # the hard-iron offset.
   #
-  # When picking it up, the sequence that works (per bmi2auxClass):
+  # The sequence it follows (per bmi2auxClass and Bosch's own aux example):
   #   1. write BMI2_AUX_IF_TRIM to set the aux bus pull-ups
   #   2. configure accel + gyro + aux together, then enable all three
   #   3. aux in MANUAL mode first, so bmm150_init() and the power-mode
@@ -184,11 +184,12 @@ devices:
   #      and the sample arrives in sens_data.aux_data at no extra bus cost
   #   5. compensate with bmm150_aux_mag_data() using the trim registers
   #
-  # Bosch's bmm150.c and bmm150_defs.h already exist in the tree, under
-  # third-party/esp-claw/components/lua_modules/lua_module_magnetometer/src/.
-  # Only the register map and the compensation maths are wanted from there;
-  # that component's own backend opens the chip on the main I2C bus, which
-  # on this board reaches nothing.
+  # Bosch's bmm150.c and bmm150_defs.h come from the ESP-Claw submodule
+  # (lua_module_magnetometer/src/bmm150/), copied verbatim into
+  # components/mpx_robot/src/bmm150/ -- the submodule is never edited. Only
+  # the register map and the compensation maths are wanted from there; that
+  # component's own backend opens the chip on the main I2C bus, which on this
+  # board reaches nothing, and it stays off in sdkconfig.defaults.board.
   #
   # Do NOT copy M5's I2C address. They strap SDO high and use
   # BMI2_I2C_SEC_ADDR (0x69); this board ties SDO to GND and is 0x68.

@@ -46,37 +46,80 @@ CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
 CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 
+# The LCD panel's own SPI DMA transmit buffer is internal-RAM-only by
+# hardware necessity, and there is nothing in this project that can move
+# it -- it belongs to the ESP-Claw LCD driver. What IS movable is
+# everything competing with it for that same internal, DMA-capable heap.
+# The LVGL render thread's own task stack is one of those competitors and
+# has no DMA requirement of its own (it is plain CPU-touched code, not a
+# hardware transmit buffer), so it is safe to push to PSRAM -- freeing
+# real internal headroom for the buffer that actually needs to be there.
+# Found this while chasing "spi_master: Failed to allocate priv TX
+# buffer" / "Draw bitmap failed: ESP_ERR_NO_MEM" flooding the log any time
+# a websocket (voice or OTA) stays open for a while: `voice connect`
+# logged the internal heap's largest free block at only 9216 bytes even
+# BEFORE the socket opened, which is too tight a margin for this firmware's
+# full feature set (Wi-Fi + LVGL + I2S + TLS) to share reliably.
+CONFIG_ESP_LVGL_ADAPTER_LVGL_THREAD_STACK_IN_PSRAM=y
+
 #
-# BLE config
+# BLE: OFF.
 #
-CONFIG_BT_ENABLED=y
-CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
-CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=n
-CONFIG_BTDM_CTRL_MODE_BTDM=n
-CONFIG_BT_BLUEDROID_ENABLED=n
-CONFIG_BT_NIMBLE_ENABLED=y
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
-CONFIG_BT_NIMBLE_MAX_BONDS=2
-CONFIG_BT_NIMBLE_MAX_CCCDS=2
-CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
-CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
-CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT=n
-CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
-CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=6
-CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=12
-CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=12
-CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=15
-CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=64
-CONFIG_BT_NIMBLE_ATT_MAX_PREP_ENTRIES=15
-CONFIG_BT_NIMBLE_GATT_CLIENT=n
-CONFIG_BT_NIMBLE_DYNAMIC_SERVICE=y
-CONFIG_BT_NIMBLE_NVS_PERSIST=y
-CONFIG_BT_ALARM_MAX_NUM=20
-CONFIG_BT_NIMBLE_PRINT_ERR_NAME=n
-CONFIG_BT_CTRL_BLE_MAX_ACT=2
-CONFIG_BT_CTRL_ADV_DUP_FILT_MAX=1
-CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_SUPP=n
-CONFIG_BT_CTRL_BLE_SCAN_DUPL=n
+# Nothing in this firmware uses the radio for Bluetooth. The only BLE
+# consumers anywhere in ESP-Claw are lua_module_ble and lua_module_ble_hid,
+# and both are off (CONFIG_APP_CLAW_LUA_MODULE_BLE / _BLE_HID are not set).
+# With CONFIG_BT_ENABLED=y the controller and NimBLE host are still linked,
+# and the controller reserves its static working memory in internal .bss at
+# boot whether or not anything ever calls esp_bt_controller_init() -- that
+# is tens of KB of the one memory this firmware is short of (see the
+# ALWAYSINTERNAL notes in boards/*/sdkconfig.defaults.board), plus the
+# Wi-Fi/BT coexistence code it drags into IRAM. Found while bringing the
+# esp-sr audio front end up on mp4_esp32_core: the LCD's SPI DMA bounce
+# buffer could no longer be allocated once the AFE was created.
+#
+# To turn BLE back on for a Lua BLE skill, set CONFIG_BT_ENABLED=y and
+# restore the NimBLE sizing below (kept here, commented, so it is not lost):
+CONFIG_BT_ENABLED=n
+# CONFIG_BT_ENABLED=y
+# CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+# CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=n
+# CONFIG_BTDM_CTRL_MODE_BTDM=n
+# CONFIG_BT_BLUEDROID_ENABLED=n
+# CONFIG_BT_NIMBLE_ENABLED=y
+# CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+# CONFIG_BT_NIMBLE_MAX_BONDS=2
+# CONFIG_BT_NIMBLE_MAX_CCCDS=2
+# CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+# CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+# CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT=n
+# CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
+# CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=6
+# CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=12
+# CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=12
+# CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=15
+# CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=64
+# CONFIG_BT_NIMBLE_ATT_MAX_PREP_ENTRIES=15
+# CONFIG_BT_NIMBLE_GATT_CLIENT=n
+# CONFIG_BT_NIMBLE_DYNAMIC_SERVICE=y
+# CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# CONFIG_BT_ALARM_MAX_NUM=20
+# CONFIG_BT_NIMBLE_PRINT_ERR_NAME=n
+# CONFIG_BT_CTRL_BLE_MAX_ACT=2
+# CONFIG_BT_CTRL_ADV_DUP_FILT_MAX=1
+# CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_SUPP=n
+# CONFIG_BT_CTRL_BLE_SCAN_DUPL=n
+
+# Wi-Fi static TX buffers: 8, not the default 16.
+#
+# With CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y the driver cannot use dynamic
+# TX buffers (Kconfig forbids the combination), so every static buffer is
+# ~1.6 KB of internal DMA memory allocated at esp_wifi_init() and never
+# returned: 16 of them is ~26 KB. The 32 cache TX buffers (in PSRAM) absorb
+# bursts from the TCP/IP stack before a static buffer is even needed, and
+# this firmware's traffic is an Opus voice stream plus a couple of PWA
+# websockets, not a bulk transfer, so 8 leaves headroom. Same reasoning as
+# the RX buffer counts above.
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
 
 # See https://github.com/espressif/esp-claw/issues/101
 CONFIG_HTTP_REUSE_ENABLE=n
@@ -136,3 +179,23 @@ CONFIG_PIX_CVT_YUV_TO_YUV_SUPPORT=n
 # is that main.c does its network-status work on its own task (see
 # main_net_status_task), so nothing heavy runs here.
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# ---- Internal RAM: code that does not need to be in IRAM ------------------
+#
+# On the ESP32-S3, IRAM and DRAM are carved out of the same 512 KB of SRAM,
+# so every KB of code that lives in IRAM is a KB the heap does not get. A
+# -Og debug build of this firmware loads ~134 KB into IRAM. These are the
+# standard IDF "reduce IRAM usage" knobs: they move code that is never run
+# with the flash cache disabled out to flash (which, with
+# CONFIG_SPIRAM_XIP_FROM_PSRAM above, actually executes from PSRAM).
+#
+# -Os rather than -Og: a smaller IRAM footprint, a smaller app image (the
+# debug build had 4% of its 5 MB OTA slot left), and faster code -- -Og
+# is the least optimised of the three and esp-sr's AEC/WakeNet inference
+# is CPU-bound. Backtraces still resolve; only single-stepping gets worse.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+# Not CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH: it is only ~4 KB, and it is
+# unsafe if anything calls the heap from an IRAM ISR while the cache is off
+# (an OTA or NVS write), which is not something worth auditing for 4 KB.

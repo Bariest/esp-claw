@@ -247,7 +247,15 @@ esp_err_t mpx_voice_provision(const char *ota_url)
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_header(client, "Device-Id", mac_str);
     esp_http_client_set_header(client, "Client-Id", uuid_str);
-    esp_http_client_set_header(client, "Activation-Version", "2");
+    /* "2" tells the console this device carries an efuse-programmed serial
+     * number and will complete the HMAC challenge/response activation flow
+     * (Ota::Activate() in the reference client). We have neither -- no
+     * factory-programmed serial number, no /activate call -- so claiming v2
+     * is what produces "Serial number is required. Please check if the
+     * device is programmed" in the console: it is waiting on a step this
+     * firmware never performs. Devices without a serial number use v1,
+     * the plain code-in-console flow this firmware actually implements. */
+    esp_http_client_set_header(client, "Activation-Version", "1");
     esp_http_client_set_header(client, "User-Agent", "mp4-claw/0.1.0");
     esp_http_client_set_header(client, "Accept-Language", "en-US");
     esp_http_client_set_post_field(client, body, (int)strlen(body));

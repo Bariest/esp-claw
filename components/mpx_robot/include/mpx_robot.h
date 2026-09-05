@@ -141,9 +141,14 @@ void  mpx_robot_reset_offsets(void);
 typedef struct {
     float ax, ay, az;   /*!< accelerometer, g   */
     float gx, gy, gz;   /*!< gyroscope, dps     */
+    float mx, my, mz;   /*!< magnetometer, uT -- zero unless mag_valid */
+    bool  mag_valid;    /*!< BMM150 found behind the BMI270 and sampled */
 } mpx_robot_imu_t;
 
 void mpx_robot_imu_read(mpx_robot_imu_t *out);
+
+/** @brief True once the BMM150 magnetometer came up (see mpx_imu.cc). */
+bool mpx_robot_mag_ready(void);
 
 /**
  * @brief Measured servo angle in the same frame mpx_robot_set_servo_angle()

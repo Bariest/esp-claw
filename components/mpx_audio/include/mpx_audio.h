@@ -85,6 +85,32 @@ esp_err_t mpx_audio_capture_start(uint32_t sample_rate, uint8_t channels, uint8_
 esp_err_t mpx_audio_capture_read(int16_t *mono, size_t frames);
 void      mpx_audio_capture_stop(void);
 
+/* True between a successful mpx_audio_capture_start() and the matching
+ * mpx_audio_capture_stop() -- the codec is a single hardware stream, so
+ * whoever calls capture_start() next while this is true does NOT get an
+ * error (capture_start() is intentionally idempotent, for a caller
+ * resuming its own already-open capture) but WOULD be reading the same
+ * stream as whoever opened it, silently interleaving with them. Callers
+ * that do not own the capture themselves -- mpx_voice_wake's `wake start`,
+ * mpx_voice_link's `voice talk` -- check this first and refuse instead of
+ * risking that. */
+bool mpx_audio_capture_active(void);
+
+/* How many channels the current (or most recent) capture_start() opened.
+ * Needed by a caller reading the interleaved raw stream below, since it
+ * has to size its own buffer -- mpx_audio_capture_read()'s mono callers
+ * never needed to know this. */
+uint8_t mpx_audio_capture_channels(void);
+
+/* Same capture, without the de-interleave-to-mono step: `interleaved` gets
+ * `frames * mpx_audio_capture_channels()` samples, straight off the codec,
+ * in whatever order the ES7210's TDM slots deliver them (see
+ * mpx_audio_cmd.c's usage text for what is documented about that order,
+ * and mpx_voice_wake's comments for what is actually verified). For a
+ * multi-mic consumer like an AFE front end that needs every channel, not
+ * just one picked out of it. */
+esp_err_t mpx_audio_capture_read_raw(int16_t *interleaved, size_t frames);
+
 esp_err_t mpx_audio_output_start(uint32_t sample_rate);
 esp_err_t mpx_audio_output_write(const int16_t *mono, size_t frames);
 void      mpx_audio_output_stop(void);

@@ -35,6 +35,17 @@ extern "C" {
 /* An Opus frame at these rates is a few hundred bytes; this is generous. */
 #define MPX_VOICE_PACKET_MAX      1500
 
+/* The rate the SPEAKER runs at, which is not the downlink rate. The server
+ * encodes TTS at 24 kHz, but Opus decodes to whatever rate the decoder was
+ * opened with, and the decoder here is opened at 16 kHz on purpose: the
+ * ES7210 (mic) and the MAX98357A (speaker) sit on the same I2S peripheral,
+ * and esp_codec_dev refuses to open the second direction at a different
+ * sample rate from the first ("conflict sample_rate ... with peer mode").
+ * The wake-word front end keeps the microphone open at 16 kHz while a reply
+ * plays -- that is how barge-in hears you -- so the reply has to play at
+ * 16 kHz too. Wideband speech loses nothing audible in the process. */
+#define MPX_VOICE_PLAYBACK_RATE   16000
+
 esp_err_t mpx_voice_codec_start(uint32_t encode_rate, uint32_t decode_rate);
 void      mpx_voice_codec_stop(void);
 bool      mpx_voice_codec_running(void);
@@ -92,6 +103,124 @@ uint32_t    mpx_voice_downlink_rate(void);
 /* Send one control message. `json` is sent verbatim, so the caller owns the
  * shape -- this is deliberately thin while the protocol is being brought up. */
 esp_err_t mpx_voice_send_json(const char *json);
+
+/* Send one binary WebSocket frame -- an Opus packet, uplink. */
+esp_err_t mpx_voice_send_binary(const uint8_t *data, size_t len);
+
+/* ── Streaming (Phase 2b) ──────────────────────────────────────────────────
+ *
+ * mpx_voice_ws.c owns the socket and knows a frame arrived; it does not know
+ * Opus or the audio hardware, so it hands binary frames off here rather than
+ * decoding them itself -- same reasoning as the MCP sink above, one layer
+ * down. mpx_voice_stream_init() is safe to call more than once (the second
+ * call is a no-op) and mpx_voice_talk_start() calls it, so nothing else
+ * needs to call it directly except mpx_voice_ws.c wiring the RX side up
+ * before a talk ever happens. */
+esp_err_t mpx_voice_stream_init(void);
+
+/* RX: mpx_voice_ws.c calls this from the websocket event handler for every
+ * binary (op_code 0x02) frame. Copies and queues -- never decodes inline,
+ * see mpx_voice_stream.c's file header for why. */
+void mpx_voice_stream_rx_frame(const uint8_t *data, size_t len);
+
+/* RX: mpx_voice_ws.c calls this when a {"type":"tts","state":"stop"}
+ * message arrives, so playback closes the speaker instead of leaving I2S
+ * running with nothing feeding it. */
+void mpx_voice_stream_on_tts_stop(void);
+
+/* Push-to-talk: open the mic, stream Opus uplink frames until told to stop
+ * or `max_seconds` elapses (0 = no limit, use `mpx_voice_talk_stop`), then
+ * close the mic and send listen/stop. Requires MPX_VOICE_READY. Refuses
+ * with ESP_ERR_INVALID_STATE if something else already holds the
+ * microphone open (mpx_audio_capture_active()) -- see mpx_voice_wake for
+ * the component that's usually why. */
+esp_err_t mpx_voice_talk_start(uint32_t max_seconds);
+void      mpx_voice_talk_stop(void);
+bool      mpx_voice_talk_active(void);
+
+/* Hands-free variant, used by mpx_voice_wake after the wake word. Sends
+ * listen/start in "auto" mode, so the SERVER decides when you have stopped
+ * speaking (its VAD, not a fixed window): the microphone streams until the
+ * server takes its turn -- an "stt" transcript or the first "tts" message
+ * arrives (see mpx_voice_stream_on_server_turn()) -- or `max_seconds` passes
+ * with nothing heard, whichever is first. Same preconditions as
+ * mpx_voice_talk_start(). Returns as soon as the talk task is up; use
+ * mpx_voice_talk_wait() to block until it has released the microphone. */
+esp_err_t mpx_voice_talk_start_auto(uint32_t max_seconds);
+
+/* Block until the current talk (either kind) has finished and closed the
+ * microphone, or `timeout_ms` passes. ESP_OK when not talking. */
+esp_err_t mpx_voice_talk_wait(uint32_t timeout_ms);
+
+/* After a talk has ended: did the server take its turn (a reply is on its
+ * way), or did the talk end on its own -- timeout, or `voice talk stop`?
+ * The hands-free loop uses this to tell "wait for the reply" from "nothing
+ * was said, go back to the wake word". */
+bool mpx_voice_talk_server_took_turn(void);
+
+/* Counts "tts stop" messages, i.e. replies the server has finished
+ * sending. Compare before and after to know a reply has ended; combine
+ * with mpx_voice_stream_is_playing() to know it has finished playing. */
+uint32_t mpx_voice_stream_tts_stop_count(void);
+
+/* mpx_voice_ws.c calls this when the server has clearly taken its turn in
+ * the conversation -- an "stt" result, or "tts" start/sentence_start -- so
+ * an auto-mode talk stops streaming instead of feeding the server its own
+ * reply through the microphone. Harmless when nothing is talking. */
+void mpx_voice_stream_on_server_turn(void);
+
+/* True while a TTS reply is actively being decoded and played -- i.e.
+ * between the first downlink audio frame of a reply and its "tts stop".
+ * mpx_voice_wake uses this to decide whether a wake word heard mid-reply
+ * means barge-in (see mpx_voice_stream_abort_playback() below) or just an
+ * ordinary wake from idle. */
+bool mpx_voice_stream_is_playing(void);
+
+/* Barge-in: stop playback immediately, discarding any already-queued
+ * downlink frames, rather than the graceful drain mpx_voice_stream_on_tts_stop()
+ * does for a normal end-of-reply. The caller is still responsible for
+ * telling the server -- this only silences the speaker on this end. */
+void mpx_voice_stream_abort_playback(void);
+
+/* ── MCP bridge hook (Phase 3) ─────────────────────────────────────────────
+ *
+ * This component knows the xiaozhi wire format -- {"type":"mcp","payload":
+ * {...}} -- but nothing about MCP itself; that lives in mpx_mcp_ws, which
+ * would have to depend back on this component to send replies, so the
+ * dependency only runs one direction: mpx_mcp_ws registers a sink here at
+ * its own init time, and voice_handle_text() calls it when an "mcp" message
+ * arrives, instead of this component including mpx_mcp_ws.h.
+ *
+ * `sink` receives ownership of a heap-allocated, NUL-terminated JSON-RPC
+ * string (the "payload" object, re-serialized) and must free it -- there is
+ * exactly one message in flight per call, no batching. Before a sink is
+ * registered, "mcp" messages are logged and dropped. */
+typedef void (*mpx_voice_mcp_sink_t)(const char *jsonrpc_owned);
+void mpx_voice_set_mcp_sink(mpx_voice_mcp_sink_t sink);
+
+/* ── Face / screen hooks (Phase 5) ─────────────────────────────────────────
+ *
+ * The server narrates the conversation as it goes: an "stt" transcript of
+ * what you said, "tts sentence_start" for each sentence it is about to say,
+ * an "llm" emotion hint per reply, and "tts stop" / "goodbye" when it is
+ * done. This component only knows the wire format; what to do with them on
+ * a panel is cap_display's business, and cap_display is only in the build on
+ * boards with an LCD -- so, same shape as the MCP sink above, main.c
+ * registers a set of callbacks here at boot instead of this component
+ * including cap_display.h.
+ *
+ * All callbacks run on the websocket task, so they must be quick and must
+ * not call back into this component. Any may be NULL. Strings are only valid
+ * for the duration of the call. */
+typedef struct {
+    void (*heard)(const char *text);        /* "stt": what the server understood */
+    void (*saying)(const char *text);       /* "tts sentence_start": the next sentence */
+    void (*emotion)(const char *name);      /* "llm": xiaozhi emotion name, e.g. "happy" */
+    void (*reply_done)(void);               /* "tts stop": the reply has been sent */
+    void (*session_ended)(void);            /* "goodbye": the conversation is over */
+} mpx_voice_ui_hooks_t;
+
+void mpx_voice_set_ui_hooks(const mpx_voice_ui_hooks_t *hooks);
 
 void register_voice_command(void);
 

@@ -51,7 +51,11 @@ static SemaphoreHandle_t s_lock;
  *
  * Two things changed and both matter:
  *
- *   SPI2 now belongs to the ST7789 display, so the servo bus moved to SPI3.
+ *   The servo bus is on SPI2 and the ST7789 display on SPI3. It was the other
+ *   way round at first, and the fourth driver board would not attach:
+ *   ESP32-S3 GP-SPI3 has only three chip-select lines (GP-SPI2 has six), and
+ *   spi_bus_add_device reports a full CS table as ESP_ERR_NO_MEM. The display
+ *   needs one CS, so it takes the small host (board_peripherals.yaml).
  *   The IMU also left this bus -- it is a BMI270 on I2C now, not a QMI8658C
  *   on SPI -- so nothing else shares these three pins any more.
  *
@@ -64,7 +68,7 @@ static SemaphoreHandle_t s_lock;
  *                 IO15_SPI_CS1 (CN3), IO7_SPI_CS2 (CN4),
  *                 IO4_SPI_CS3  (CN5), IO5_SPI_CS4 (CN6).
  */
-#define SPI_MASTER_ID    SPI3_HOST
+#define SPI_MASTER_ID    SPI2_HOST   /* six CS lines; SPI3 has three */
 #define SPI_MASTER_MOSI  6
 #define SPI_MASTER_MISO  17
 #define SPI_MASTER_CLK   16
@@ -243,7 +247,7 @@ bool driver_board_init(void)
      * The servos are live from the moment the battery is connected.       */
 
     /* ---- SPI bus ---------------------------------------------------------
-     * SPI3, exclusively ours. On the earlier board this host was shared with
+     * SPI2, exclusively ours. On the earlier board this host was shared with
      * a QMI8658C IMU and the two raced to bring the bus up; here the IMU is a
      * BMI270 on I2C, so nothing else touches these pins. ESP_ERR_INVALID_STATE
      * is still tolerated rather than fatal, in case driver_board_init() is

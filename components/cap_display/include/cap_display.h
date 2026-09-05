@@ -41,6 +41,19 @@ esp_err_t cap_display_face_start(void);
  *  network to join, since they have not joined it yet. */
 void cap_display_face_set_network(bool sta_connected, const char *ap_ssid, const char *ip);
 
+/** @brief The conversation on the face -- targets for mpx_voice_set_ui_hooks().
+ *
+ *  heard/saying put a one-line subtitle under the eyes (the network line
+ *  comes back by itself once the reply is over and the robot goes quiet);
+ *  emotion maps the server's xiaozhi emotion name onto the face's
+ *  expressions. All safe to call from any task and on a board with no panel
+ *  (they do nothing there). */
+void cap_display_voice_heard(const char *text);
+void cap_display_voice_saying(const char *text);
+void cap_display_voice_emotion(const char *name);
+void cap_display_voice_reply_done(void);
+void cap_display_voice_session_ended(void);
+
 /** @brief Draw a bring-up test pattern, hold it, then restore the face.
  *
  *  Corner labels, RGB bars and an edge frame -- enough to judge mirror_x,

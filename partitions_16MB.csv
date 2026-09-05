@@ -2,8 +2,8 @@
 nvs,       data, nvs,     0xA000,   0x6000
 otadata,   data, ota,     0x10000,  0x2000
 phy_init,  data, phy,     0x12000,  0x1000
-ota_0,     app,  ota_0,         ,   4352K
-ota_1,     app,  ota_1,         ,   4352K
+ota_0,     app,  ota_0,         ,   5120K
+ota_1,     app,  ota_1,         ,   5120K
 system,    data, fat,           ,   2600K
 storage,   data, fat,           ,   2048K
-model,     data, spiffs,        ,   2904K
+model,     data, spiffs,        ,   1024K

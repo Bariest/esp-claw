@@ -37,6 +37,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "argtable3/argtable3.h"
@@ -342,6 +343,26 @@ static void test_imu(void)
     const char *axis = fabsf(s.az) > 0.7f ? "Z" : (fabsf(s.ay) > 0.7f ? "Y" : (fabsf(s.ax) > 0.7f ? "X" : "none"));
     snprintf(detail, sizeof(detail), "gravity is on %s -- expect Z on a level robot", axis);
     r_look("Orientation", detail);
+
+    /* The BMM150 hangs off the BMI270's aux bus, so "answers on I2C" above
+     * says nothing about it; the only proof is a plausible field. Earth's
+     * is 25-65 uT depending on where you are; a chip reading zero is not
+     * being polled, one reading hundreds has a magnet next to it. */
+    if (s.mag_valid) {
+        const float field = sqrtf(s.mx * s.mx + s.my * s.my + s.mz * s.mz);
+        snprintf(detail, sizeof(detail), "m=(%+.0f %+.0f %+.0f) uT  |m|=%.0f", s.mx, s.my, s.mz, field);
+        if (field >= 15.0f && field <= 150.0f) {
+            r_pass("Magnetometer", detail);
+        } else {
+            r_board("Magnetometer", detail);
+            printf("        Earth's field is 25-65 uT. Much more means something magnetic is "
+                   "close (a speaker?); zero means the aux bus is not delivering.\n");
+        }
+    } else if (mpx_robot_mag_ready()) {
+        r_board("Magnetometer", "BMM150 came up but no sample has arrived yet");
+    } else {
+        r_board("Magnetometer", "BMM150 not found behind the BMI270 -- see the boot log");
+    }
 #else
     r_skip("IMU", "MP4_ROBOT_ENABLE is off");
 #endif
@@ -583,6 +604,306 @@ static int selftest_cmd(int argc, char **argv)
     return s_fail == 0 ? 0 : 1;
 }
 
+
+/* ── `imu` and `button`: live views for bring-up ──────────────────────────
+ *
+ * `selftest --imu` is a single snapshot with a pass/fail; these two are for
+ * watching the hardware while you handle it -- the M5CoreS3IMU style of
+ * bring-up, minus the screen: tilt the board and watch pitch/roll follow,
+ * press a button and see the edge with a timestamp. */
+
+#define IMU_WATCH_DEFAULT_S    10
+#define IMU_WATCH_DEFAULT_HZ   5
+#define IMU_CAL_DEFAULT_S      20
+#define BTN_WATCH_DEFAULT_S    15
+#define RAD2DEG(x)             ((x) * 57.2957795f)
+
+#if CONFIG_MP4_ROBOT_ENABLE
+/* Hard-iron offset for the compass, from `imu cal`. RAM only: this is a
+ * bring-up aid, and the offset changes with anything magnetic near the board
+ * -- the MAX98357A's speaker magnet is centimetres from the BMM150, so the
+ * heading without it will be biased, sometimes badly. */
+static float s_mag_off[3] = {0, 0, 0};
+static bool  s_mag_cal    = false;
+
+/* Tilt-compensated compass heading from the magnetometer, in degrees
+ * clockwise from magnetic north with the sensor's +X as "forward".
+ *
+ * Gravity gives the up vector; the magnetic vector projected onto the plane
+ * perpendicular to it is where north is, and the sensor's X axis projected
+ * onto the same plane is where the board points. This works at any tilt as
+ * long as the board is not accelerating, and assumes the BMM150 and BMI270
+ * axes agree -- they are separate chips and may be mounted differently, so
+ * check it: a full slow turn on the spot must sweep 0..360. Returns a
+ * negative value when the field is too weak to trust (no chip, or saturated
+ * next to a magnet). */
+static float imu_heading_deg(const mpx_robot_imu_t *s, float *field_ut)
+{
+    float m[3] = { s->mx - s_mag_off[0], s->my - s_mag_off[1], s->mz - s_mag_off[2] };
+    float u[3] = { s->ax, s->ay, s->az };
+
+    const float mn = sqrtf(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+    const float un = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+    if (field_ut) *field_ut = mn;
+    if (!s->mag_valid || mn < 5.0f || un < 0.3f) {
+        return -1.0f;
+    }
+    for (int i = 0; i < 3; i++) u[i] /= un;
+
+    /* forward = X with its vertical part removed; left = up x forward */
+    float f[3] = { 1.0f - u[0] * u[0], -u[0] * u[1], -u[0] * u[2] };
+    const float fn = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    if (fn < 0.05f) {
+        return -1.0f;   /* X is pointing straight up or down: no heading */
+    }
+    for (int i = 0; i < 3; i++) f[i] /= fn;
+    const float l[3] = { u[1] * f[2] - u[2] * f[1],
+                         u[2] * f[0] - u[0] * f[2],
+                         u[0] * f[1] - u[1] * f[0] };
+
+    const float mf = m[0] * f[0] + m[1] * f[1] + m[2] * f[2];
+    const float ml = m[0] * l[0] + m[1] * l[1] + m[2] * l[2];
+    float h = RAD2DEG(atan2f(ml, mf));
+    if (h < 0) h += 360.0f;
+    return h;
+}
+#endif
+
+static void imu_print_sample(uint32_t t_ms)
+{
+#if CONFIG_MP4_ROBOT_ENABLE
+    mpx_robot_imu_t s = {0};
+    mpx_robot_imu_read(&s);
+
+    const float mag = sqrtf(s.ax * s.ax + s.ay * s.ay + s.az * s.az);
+    /* Accelerometer-only attitude: fine for a still or slowly moving body,
+     * meaningless while it is being shaken -- which the |a| column shows. */
+    const float pitch = RAD2DEG(atan2f(-s.ax, sqrtf(s.ay * s.ay + s.az * s.az)));
+    const float roll  = RAD2DEG(atan2f(s.ay, s.az));
+    const float spin  = fabsf(s.gx) + fabsf(s.gy) + fabsf(s.gz);
+
+    const char *state;
+    if (fabsf(mag - 1.0f) > 0.5f) {
+        state = "SHAKE";
+    } else if (spin > 60.0f) {
+        state = "turning";
+    } else if (s.az < -0.7f) {
+        state = "UPSIDE DOWN";
+    } else if (fabsf(pitch) > 30.0f) {
+        state = pitch > 0 ? "nose up" : "nose down";
+    } else if (fabsf(roll) > 30.0f) {
+        state = roll > 0 ? "roll right" : "roll left";
+    } else {
+        state = spin > 15.0f ? "moving" : "level, still";
+    }
+
+    printf("  %6" PRIu32 " ms  a %+5.2f %+5.2f %+5.2f g |a| %4.2f   g %+7.1f %+7.1f %+7.1f dps"
+           "   pitch %+6.1f roll %+6.1f",
+           t_ms, s.ax, s.ay, s.az, mag, s.gx, s.gy, s.gz, pitch, roll);
+
+    if (s.mag_valid) {
+        float field = 0;
+        const float heading = imu_heading_deg(&s, &field);
+        printf("   m %+4.0f %+4.0f %+4.0f uT |m| %3.0f", s.mx, s.my, s.mz, field);
+        if (heading >= 0) {
+            static const char *const dirs[] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+            printf("  hdg %5.1f %-2s%s", heading, dirs[((int)(heading + 22.5f) / 45) % 8],
+                   s_mag_cal ? "" : "*");
+        } else {
+            printf("  hdg  ---   ");
+        }
+    } else if (mpx_robot_mag_ready()) {
+        printf("   m  (waiting)");
+    } else {
+        printf("   m  (no BMM150)");
+    }
+    printf("   %s\n", state);
+#else
+    (void)t_ms;
+    printf("  MP4_ROBOT_ENABLE is off -- no IMU driver in this build\n");
+#endif
+}
+
+static int imu_cmd(int argc, char **argv)
+{
+    /* Deliberately not gated on mpx_robot_ready(): that is false with no
+     * servo boards attached, but the IMU is brought up regardless (the boot
+     * log says "IMU initialised"). All-zero readings are the tell if it is
+     * not. */
+    if (argc >= 2 && strcmp(argv[1], "watch") == 0) {
+        const uint32_t secs = (argc >= 3) ? (uint32_t)atoi(argv[2]) : IMU_WATCH_DEFAULT_S;
+        uint32_t hz = (argc >= 4) ? (uint32_t)atoi(argv[3]) : IMU_WATCH_DEFAULT_HZ;
+        if (hz < 1) hz = 1;
+        if (hz > 20) hz = 20;   /* the driver polls at 20 Hz; faster just repeats */
+        printf("  watching the BMI270 for %" PRIu32 " s at %" PRIu32 " Hz -- tilt it, turn it, shake it\n"
+               "  (axes are the chip's: +Z should read +1 g with the board flat and face up;\n"
+               "   hdg is the compass, 0 = magnetic north, * = no `imu cal` yet)\n",
+               secs, hz);
+        const int64_t t0 = esp_timer_get_time();
+        const int64_t end = t0 + (int64_t)secs * 1000000;
+        while (esp_timer_get_time() < end) {
+            imu_print_sample((uint32_t)((esp_timer_get_time() - t0) / 1000));
+            vTaskDelay(pdMS_TO_TICKS(1000 / hz));
+        }
+        return 0;
+    }
+#if CONFIG_MP4_ROBOT_ENABLE
+    if (argc >= 2 && strcmp(argv[1], "cal") == 0) {
+        /* Hard-iron calibration: the field the chip sees is the Earth's plus
+         * a fixed offset from whatever is magnetised on the board. Turn the
+         * board through every orientation and the Earth part sweeps a
+         * sphere while the offset stays put -- so the centre of the min/max
+         * box on each axis is the offset. Crude but it is what every phone
+         * does with its figure-eight dance, and it turns a heading that is
+         * off by 30-90 degrees into one that is off by a few. */
+        if (!mpx_robot_mag_ready()) {
+            printf("  no BMM150 -- see the boot log for 'BMM150' lines\n");
+            return 1;
+        }
+        const uint32_t secs = (argc >= 3) ? (uint32_t)atoi(argv[2]) : IMU_CAL_DEFAULT_S;
+        float lo[3] = {  1e9f,  1e9f,  1e9f };
+        float hi[3] = { -1e9f, -1e9f, -1e9f };
+        int n = 0;
+        printf("  calibrating the compass for %" PRIu32 " s: slowly turn the board through EVERY\n"
+               "  orientation -- flat, on edge, upside down, spin it -- like a figure eight\n", secs);
+        const int64_t end = esp_timer_get_time() + (int64_t)secs * 1000000;
+        while (esp_timer_get_time() < end) {
+            mpx_robot_imu_t s = {0};
+            mpx_robot_imu_read(&s);
+            if (s.mag_valid) {
+                const float m[3] = { s.mx, s.my, s.mz };
+                for (int i = 0; i < 3; i++) {
+                    if (m[i] < lo[i]) lo[i] = m[i];
+                    if (m[i] > hi[i]) hi[i] = m[i];
+                }
+                n++;
+            }
+            if ((n % 20) == 1) {
+                printf("  x %+5.0f..%+5.0f  y %+5.0f..%+5.0f  z %+5.0f..%+5.0f uT\r",
+                       lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+                fflush(stdout);
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        printf("\n");
+        if (n < 10) {
+            printf("  no magnetometer samples arrived\n");
+            return 1;
+        }
+        float span_min = 1e9f;
+        for (int i = 0; i < 3; i++) {
+            s_mag_off[i] = (hi[i] + lo[i]) * 0.5f;
+            if (hi[i] - lo[i] < span_min) span_min = hi[i] - lo[i];
+        }
+        s_mag_cal = true;
+        printf("  offset  x %+5.0f  y %+5.0f  z %+5.0f uT   (span x %.0f y %.0f z %.0f)\n",
+               s_mag_off[0], s_mag_off[1], s_mag_off[2],
+               hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+        if (span_min < 40.0f) {
+            printf("  one axis barely moved -- the board was not turned enough on that axis;\n"
+                   "  the Earth's field is ~40-60 uT, so each span should be ~80-120. Run it again.\n");
+        } else {
+            printf("  applied (RAM only, lost at reboot). `imu watch` heading is now corrected.\n");
+        }
+        return 0;
+    }
+#endif
+    if (argc >= 2 && strcmp(argv[1], "help") == 0) {
+        printf("\n  imu                 one reading\n"
+               "  imu watch [s] [hz]  live readings, default %d s at %d Hz\n"
+               "  imu cal [s]         compass hard-iron calibration, default %d s\n\n"
+               "  a = accelerometer in g, |a| its magnitude (1.00 at rest);\n"
+               "  g = gyroscope in deg/s; pitch/roll from the accelerometer,\n"
+               "  so only meaningful while the board is not being shaken.\n"
+               "  m = BMM150 magnetometer in uT (through the BMI270 aux bus),\n"
+               "  |m| its magnitude (Earth: ~40-60 uT, more near a magnet);\n"
+               "  hdg = tilt-compensated heading, 0 = magnetic north, +X forward.\n\n",
+               IMU_WATCH_DEFAULT_S, IMU_WATCH_DEFAULT_HZ, IMU_CAL_DEFAULT_S);
+        return 0;
+    }
+    imu_print_sample(0);
+    return 0;
+}
+
+static int button_cmd(int argc, char **argv)
+{
+    const uint32_t secs = (argc >= 2) ? (uint32_t)atoi(argv[1]) : BTN_WATCH_DEFAULT_S;
+
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << SELFTEST_BTN_BOOT) | (1ULL << SELFTEST_BTN_WAKE),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&cfg) != ESP_OK) {
+        printf("  could not configure GPIO %d and %d\n", SELFTEST_BTN_BOOT, SELFTEST_BTN_WAKE);
+        return 1;
+    }
+
+    printf("  watching BOOT (GPIO %d) and WAKE (GPIO %d) for %" PRIu32 " s -- press them\n"
+           "  (a press reads 0: both are momentary to ground with pull-ups)\n",
+           SELFTEST_BTN_BOOT, SELFTEST_BTN_WAKE, secs);
+
+    const int64_t t0 = esp_timer_get_time();
+    const int64_t end = t0 + (int64_t)secs * 1000000;
+    int last_boot = gpio_get_level(SELFTEST_BTN_BOOT);
+    int last_wake = gpio_get_level(SELFTEST_BTN_WAKE);
+    int64_t boot_down = 0, wake_down = 0;
+    int presses = 0;
+    printf("  now: BOOT %s, WAKE %s\n", last_boot ? "released" : "PRESSED",
+           last_wake ? "released" : "PRESSED");
+
+    while (esp_timer_get_time() < end) {
+        vTaskDelay(pdMS_TO_TICKS(10));   /* 10 ms poll: a bounce shorter than that is invisible */
+        const int64_t now = esp_timer_get_time();
+        const int boot = gpio_get_level(SELFTEST_BTN_BOOT);
+        const int wake = gpio_get_level(SELFTEST_BTN_WAKE);
+        if (boot != last_boot) {
+            if (boot == 0) {
+                boot_down = now;
+                printf("  %6" PRIu32 " ms  BOOT pressed\n", (uint32_t)((now - t0) / 1000));
+                presses++;
+            } else {
+                printf("  %6" PRIu32 " ms  BOOT released  (held %" PRIu32 " ms)\n",
+                       (uint32_t)((now - t0) / 1000), (uint32_t)((now - boot_down) / 1000));
+            }
+            last_boot = boot;
+        }
+        if (wake != last_wake) {
+            if (wake == 0) {
+                wake_down = now;
+                printf("  %6" PRIu32 " ms  WAKE pressed\n", (uint32_t)((now - t0) / 1000));
+                presses++;
+            } else {
+                printf("  %6" PRIu32 " ms  WAKE released  (held %" PRIu32 " ms)\n",
+                       (uint32_t)((now - t0) / 1000), (uint32_t)((now - wake_down) / 1000));
+            }
+            last_wake = wake;
+        }
+    }
+    printf("  done: %d press(es) seen\n", presses);
+    return 0;
+}
+
+static void register_bringup_commands(void)
+{
+    const esp_console_cmd_t imu = {
+        .command = "imu",
+        .help = "BMI270+BMM150 live view: `imu`, `imu watch [s] [hz]`, `imu cal [s]`, `imu help`",
+        .hint = NULL,
+        .func = imu_cmd,
+    };
+    const esp_console_cmd_t button = {
+        .command = "button",
+        .help = "Watch BOOT (GPIO 0) and WAKE (GPIO 21) press/release: `button [s]`",
+        .hint = NULL,
+        .func = button_cmd,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&imu));
+    ESP_ERROR_CHECK(esp_console_cmd_register(&button));
+}
+
 void register_selftest_command(void)
 {
     s_args.system_   = arg_lit0(NULL, "system",    "RAM, partitions and mounts");
@@ -609,5 +930,6 @@ void register_selftest_command(void)
         .argtable = &s_args,
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    ESP_LOGI(TAG, "'selftest' console command registered");
+    register_bringup_commands();
+    ESP_LOGI(TAG, "'selftest', 'imu' and 'button' console commands registered");
 }

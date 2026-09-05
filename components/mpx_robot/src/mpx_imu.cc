@@ -18,6 +18,32 @@
  *
  * The chip is configured the same way ESP-Claw's backend configures it --
  * +/-16 g, +/-2000 dps, 200 Hz -- so readings are comparable between the two.
+ *
+ * Magnetometer: the BMM150 (U4) is NOT on the main I2C bus. Its SCL/SDA go to
+ * the BMI270's ASCX/ASDX pins -- the accelerometer's own auxiliary I2C master
+ * -- so the only way to reach it is through the BMI270. The sequence, which is
+ * Bosch's own aux example and what board_devices.yaml spells out:
+ *
+ *   1. set the aux bus pull-ups (BMI2_AUX_IF_TRIM)
+ *   2. configure the BMI2_AUX sensor in MANUAL mode and enable it, so
+ *      bmi2_read/write_aux_man_mode() can relay single register accesses
+ *   3. run bmm150_init() and the power/preset writes over that relay -- this
+ *      reads the chip id and the trim registers the compensation needs
+ *   4. flip aux to DATA mode: from then on the BMI270 itself polls the
+ *      BMM150's eight data registers at the aux ODR and the bytes arrive in
+ *      bmi2_sens_data.aux_data alongside accel and gyro, for free
+ *   5. bmm150_aux_mag_data() turns those bytes into compensated uT
+ *
+ * Accel and gyro are configured and enabled first, on their own, exactly as
+ * before; the magnetometer is added afterwards and any failure there is logged
+ * and ignored. That ordering is deliberate: a BMM150 problem must not take the
+ * accelerometer and gyro down with it.
+ *
+ * Bosch's bmm150.c lives in src/bmm150/, copied verbatim from the ESP-Claw
+ * submodule's lua_module_magnetometer (which must not be edited in place).
+ * Only the register map and the compensation maths are wanted from it; that
+ * module's own backend talks to the chip on the main bus, which here reaches
+ * nothing, and the board defaults keep it off so its copy is never linked.
  */
 
 #include "imu.h"
@@ -26,6 +52,7 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -33,6 +60,7 @@
 
 extern "C" {
 #include "bmi270_api.h"
+#include "bmm150.h"
 #include "esp_board_device.h"
 #include "esp_board_periph.h"
 #include "i2c_bus.h"
@@ -90,6 +118,15 @@ constexpr int  kPollPeriodMs   = 50;    /* 20 Hz; the gait loop wants no more */
 constexpr int  kTaskStackBytes = 4096;
 constexpr int  kTaskPriority   = 3;
 
+/* BMM150 on the BMI270's aux bus: SDO to GND, PS to 3V3, CSB to GND (see
+ * board_devices.yaml), i.e. I2C at the default address. The aux ODR only sets
+ * how often the BMI270 re-reads the chip; the BMM150's own conversion rate is
+ * set separately below and 20 Hz polling here reads whichever is newest.   */
+constexpr uint8_t kMagI2cAddr   = BMM150_DEFAULT_I2C_ADDRESS;   /* 0x10 */
+constexpr uint8_t kMagAuxOdr    = BMI2_AUX_ODR_50HZ;
+constexpr uint8_t kMagDataRate  = BMM150_DATA_RATE_30HZ;
+constexpr uint8_t kAuxPullUp    = BMI2_ASDA_PUPSEL_2K;
+
 ImuData          s_latest;
 SemaphoreHandle_t s_mutex        = nullptr;
 i2c_bus_handle_t s_i2c_bus       = nullptr;
@@ -98,6 +135,8 @@ bool             s_periph_ref    = false;
 const char      *s_periph_name   = nullptr;
 TaskHandle_t     s_task          = nullptr;
 bool             s_ready         = false;
+struct bmm150_dev s_mag          = {};
+bool             s_mag_ready     = false;
 
 esp_err_t resolve_board_cfg(const mpx_imu_board_cfg_t **out)
 {
@@ -215,6 +254,155 @@ esp_err_t configure_sensor()
     return ESP_OK;
 }
 
+/* ── BMM150 through the BMI270 aux master ─────────────────────────────────
+ *
+ * Bosch's bmm150.c talks to "a bus" through three function pointers. Here
+ * the bus is the BMI270's auxiliary master in manual mode: each call becomes
+ * a write of the BMM150 register address into BMI2_AUX_RD_ADDR / WR_ADDR and
+ * a wait for the aux-busy flag, which bmi2_read_aux_man_mode() and
+ * bmi2_write_aux_man_mode() already implement, chunked to the manual-mode
+ * burst length. bmi270_handle_t IS a `struct bmi2_dev *` (bmi270_api.h says
+ * so), so it goes straight through as intf_ptr.                            */
+
+int8_t mag_aux_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t length, void *intf_ptr)
+{
+    struct bmi2_dev *dev = (struct bmi2_dev *)intf_ptr;
+    if (dev == nullptr) {
+        return BMM150_E_COM_FAIL;
+    }
+    return bmi2_read_aux_man_mode(reg_addr, reg_data, (uint16_t)length, dev) == BMI2_OK
+               ? BMM150_INTF_RET_SUCCESS : BMM150_E_COM_FAIL;
+}
+
+int8_t mag_aux_write(uint8_t reg_addr, const uint8_t *reg_data, uint32_t length, void *intf_ptr)
+{
+    struct bmi2_dev *dev = (struct bmi2_dev *)intf_ptr;
+    if (dev == nullptr) {
+        return BMM150_E_COM_FAIL;
+    }
+    return bmi2_write_aux_man_mode(reg_addr, reg_data, (uint16_t)length, dev) == BMI2_OK
+               ? BMM150_INTF_RET_SUCCESS : BMM150_E_COM_FAIL;
+}
+
+void mag_delay_us(uint32_t period_us, void *)
+{
+    /* Init-time only (start-up and mode-change waits of 1-3 ms). Anything
+     * a tick or longer yields; the short ones busy-wait, same as the
+     * BMI270 wrapper's own delay.                                        */
+    if (period_us >= 1000u * portTICK_PERIOD_MS) {
+        vTaskDelay(pdMS_TO_TICKS((period_us + 999) / 1000));
+    } else {
+        esp_rom_delay_us(period_us);
+    }
+}
+
+/* One aux configuration for both phases: identical except for manual_en.
+ * read_addr / aux_rd_burst describe what the BMI270 fetches by itself once
+ * manual mode is off -- the BMM150's eight data registers starting at
+ * DATA_X_LSB, which is exactly the buffer bmm150_aux_mag_data() decodes.   */
+void mag_aux_config(struct bmi2_sens_config *cfg, bool manual)
+{
+    cfg->type                    = BMI2_AUX;
+    cfg->cfg.aux.aux_en          = BMI2_ENABLE;
+    cfg->cfg.aux.manual_en       = manual ? BMI2_ENABLE : BMI2_DISABLE;
+    cfg->cfg.aux.fcu_write_en    = BMI2_ENABLE;
+    cfg->cfg.aux.man_rd_burst    = BMI2_AUX_READ_LEN_3;   /* 8 bytes */
+    cfg->cfg.aux.aux_rd_burst    = BMI2_AUX_READ_LEN_3;   /* 8 bytes */
+    cfg->cfg.aux.odr             = kMagAuxOdr;
+    cfg->cfg.aux.offset          = 0;
+    cfg->cfg.aux.i2c_device_addr = kMagI2cAddr;
+    cfg->cfg.aux.read_addr       = BMM150_REG_DATA_X_LSB;
+}
+
+esp_err_t configure_magnetometer()
+{
+    /* 1. Pull-ups on the aux SDA line. The BMM150 footprint has none of its
+     *    own on this board; without these every aux transfer reads 0xFF.  */
+    uint8_t trim = kAuxPullUp;
+    int8_t rslt = bmi2_set_regs(BMI2_AUX_IF_TRIM, &trim, 1, s_sensor);
+    if (rslt != BMI2_OK) {
+        ESP_LOGW(TAG, "BMM150: aux pull-up write failed: %d", rslt);
+        return ESP_FAIL;
+    }
+
+    /* 2. Aux in manual mode, and switched on. Accel and gyro were enabled in
+     *    configure_sensor(); bmi270_sensor_enable() only ORs the aux bit in,
+     *    so they stay running.                                             */
+    struct bmi2_sens_config cfg = {};
+    mag_aux_config(&cfg, true);
+    rslt = bmi2_set_sensor_config(&cfg, 1, s_sensor);
+    if (rslt != BMI2_OK) {
+        ESP_LOGW(TAG, "BMM150: aux (manual) config failed: %d", rslt);
+        return ESP_FAIL;
+    }
+    uint8_t aux_list[1] = { BMI2_AUX };
+    rslt = bmi270_sensor_enable(aux_list, 1, s_sensor);
+    if (rslt != BMI2_OK) {
+        ESP_LOGW(TAG, "BMM150: aux enable failed: %d", rslt);
+        return ESP_FAIL;
+    }
+
+    /* 3. The BMM150 over the relay. It powers up in suspend, where every
+     *    register but POWER_CONTROL reads as zero; bmm150_init() sets that
+     *    bit first, waits 3 ms, then reads the chip id and the trim data.
+     *    A chip id of 0x00 after that means the aux bus is not reaching it
+     *    (pull-ups, address, or no chip); 0xFF means SDA is floating high. */
+    s_mag = {};
+    s_mag.intf     = BMM150_I2C_INTF;
+    s_mag.intf_ptr = s_sensor;
+    s_mag.read     = mag_aux_read;
+    s_mag.write    = mag_aux_write;
+    s_mag.delay_us = mag_delay_us;
+
+    rslt = bmm150_init(&s_mag);
+    if (rslt != BMM150_OK || s_mag.chip_id != BMM150_CHIP_ID) {
+        /* Once more after a soft reset -- the ESP-Claw backend needed this
+         * on a chip that had been left in an odd state by a previous boot. */
+        (void)bmm150_soft_reset(&s_mag);
+        mag_delay_us(BMM150_START_UP_TIME, nullptr);
+        rslt = bmm150_init(&s_mag);
+    }
+    if (rslt != BMM150_OK || s_mag.chip_id != BMM150_CHIP_ID) {
+        ESP_LOGW(TAG, "BMM150 not found on the BMI270 aux bus (init %d, chip id 0x%02X, "
+                      "expected 0x%02X) -- magnetometer disabled",
+                 rslt, (unsigned)s_mag.chip_id, (unsigned)BMM150_CHIP_ID);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    struct bmm150_settings settings = {};
+    settings.pwr_mode = BMM150_POWERMODE_NORMAL;
+    rslt = bmm150_set_op_mode(&settings, &s_mag);
+    if (rslt == BMM150_OK) {
+        /* REGULAR preset = 9/15 repetitions, 10 Hz; then lift the rate so a
+         * 20 Hz poll never sees the same conversion twice.                 */
+        settings.preset_mode = BMM150_PRESETMODE_REGULAR;
+        rslt = bmm150_set_presetmode(&settings, &s_mag);
+    }
+    if (rslt == BMM150_OK) {
+        settings.data_rate = kMagDataRate;
+        rslt = bmm150_set_sensor_settings(BMM150_SEL_DATA_RATE, &settings, &s_mag);
+    }
+    if (rslt != BMM150_OK) {
+        ESP_LOGW(TAG, "BMM150: power/preset setup failed: %d -- magnetometer disabled", rslt);
+        return ESP_FAIL;
+    }
+
+    /* 4. Hand the bus to the BMI270: manual off, and it polls DATA_X_LSB..
+     *    RHALL_MSB at the aux ODR into the aux data registers.             */
+    mag_aux_config(&cfg, false);
+    rslt = bmi2_set_sensor_config(&cfg, 1, s_sensor);
+    if (rslt != BMI2_OK) {
+        ESP_LOGW(TAG, "BMM150: aux (data mode) config failed: %d -- magnetometer disabled", rslt);
+        return ESP_FAIL;
+    }
+
+    s_mag_ready = true;
+    ESP_LOGI(TAG, "BMM150 ready behind the BMI270 aux bus (addr 0x%02X, chip id 0x%02X, "
+                  "%d Hz conversions)",
+             (unsigned)kMagI2cAddr, (unsigned)s_mag.chip_id, 30);
+    return ESP_OK;
+}
+
 void poll_task(void *)
 {
     for (;;) {
@@ -227,6 +415,21 @@ void poll_task(void *)
             sample.gx = (float)data.gyr.x / kInt16FullScale * kGyroRangeDps;
             sample.gy = (float)data.gyr.y / kInt16FullScale * kGyroRangeDps;
             sample.gz = (float)data.gyr.z / kInt16FullScale * kGyroRangeDps;
+
+            if (s_mag_ready) {
+                /* 5. Eight raw bytes -> compensated uT (int16 build of the
+                 *    Bosch driver: 1 uT resolution, plenty for a heading).
+                 *    The call masks the buffer in place, hence the copy.  */
+                uint8_t raw[BMI2_AUX_NUM_BYTES];
+                memcpy(raw, data.aux_data, sizeof(raw));
+                struct bmm150_mag_data mag = {};
+                if (bmm150_aux_mag_data(raw, &mag, &s_mag) == BMM150_OK) {
+                    sample.mx = (float)mag.x;
+                    sample.my = (float)mag.y;
+                    sample.mz = (float)mag.z;
+                    sample.mag_valid = true;
+                }
+            }
 
             if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
                 s_latest = sample;
@@ -342,6 +545,11 @@ bool imu_init()
         return false;
     }
 
+    /* Accel and gyro are up. The magnetometer is optional from here on:
+     * whatever goes wrong inside is already logged, and the poll task simply
+     * never sets mag_valid.                                                */
+    (void)configure_magnetometer();
+
     if (xTaskCreate(poll_task, "mpx_imu", kTaskStackBytes, nullptr,
                     kTaskPriority, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "poll task create failed");
@@ -366,12 +574,24 @@ ImuData imu_read()
     return copy;
 }
 
+bool imu_mag_ready()
+{
+    return s_mag_ready;
+}
+
 void imu_print()
 {
     const ImuData d = imu_read();
-    ESP_LOGI(TAG, "accel %.3f %.3f %.3f g   gyro %.2f %.2f %.2f dps",
-             (double)d.ax, (double)d.ay, (double)d.az,
-             (double)d.gx, (double)d.gy, (double)d.gz);
+    if (d.mag_valid) {
+        ESP_LOGI(TAG, "accel %.3f %.3f %.3f g   gyro %.2f %.2f %.2f dps   mag %.0f %.0f %.0f uT",
+                 (double)d.ax, (double)d.ay, (double)d.az,
+                 (double)d.gx, (double)d.gy, (double)d.gz,
+                 (double)d.mx, (double)d.my, (double)d.mz);
+    } else {
+        ESP_LOGI(TAG, "accel %.3f %.3f %.3f g   gyro %.2f %.2f %.2f dps   (no magnetometer)",
+                 (double)d.ax, (double)d.ay, (double)d.az,
+                 (double)d.gx, (double)d.gy, (double)d.gz);
+    }
 }
 
 }  // namespace robot

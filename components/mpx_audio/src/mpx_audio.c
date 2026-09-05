@@ -59,8 +59,15 @@ static int s_volume = 70;
  *
  * `adc_init_gain: 30` in board_devices.yaml does NOT do this. That value
  * lands in the board manager's own config struct; esp_codec_dev never reads
- * it, and nothing logs that the gain was left alone. */
-static float s_mic_gain_db = 30.0f;
+ * it, and nothing logs that the gain was left alone.
+ *
+ * 24 dB now, not 30: on the MP4 ESP32 CORE board, 30 dB clipped a normal
+ * speaking voice at half a metre (`audio rec` reported peak 32767 with an
+ * RMS of 4767, i.e. -17 dBFS with the tops sheared off). Clipped speech
+ * plays back fine to a human ear and is poison to a wake-word model.
+ * 24 dB keeps the same voice a few dB under full scale; `audio gain` moves
+ * it at runtime. */
+static float s_mic_gain_db = 24.0f;
 
 /* ── Output goes straight to I2S, with no codec in between ─────────────────
  *
@@ -79,19 +86,60 @@ static float s_mic_gain_db = 30.0f;
  *
  * The board manager hands out the TX channel handle already enabled, so this
  * only reconfigures the sample rate when it differs from the board default. */
-static esp_err_t audio_out_open(uint32_t rate)
-{
-    if (!s_tx) {
-        void *handle = NULL;
-        if (esp_board_periph_get_handle("i2s_audio_out", &handle) != ESP_OK || !handle) {
-            return ESP_ERR_NOT_SUPPORTED;
-        }
-        s_tx = (i2s_chan_handle_t)handle;
-    }
+/* The speaker and the microphone are the TX and RX halves of ONE I2S
+ * peripheral (board_peripherals.yaml: i2s_audio_in reuses i2s_audio_out's
+ * config, "i2s0 works in duplex mode"), and in full duplex the TX side is
+ * the clock master. esp_codec_dev knows this -- it enables TX itself when
+ * the microphone is opened alone, and refuses to disable TX while RX runs
+ * ("Pending out channel for in channel running") -- but this file drives
+ * TX directly, underneath esp_codec_dev, so it has to keep the same rule
+ * by hand:
+ *
+ *   never stop or reconfigure the TX channel while a capture is open.
+ *
+ * Stopping it silently stops the microphone's clock: the next
+ * esp_codec_dev_read() times out with rc=-1 and whatever was reading --
+ * the wake-word feed -- dies. First seen as `audio tone` killing the
+ * hands-free listener; it would have hit at the end of every reply.
+ *
+ * Two pieces of state make that possible. s_out_cfg_rate is the clock/slot
+ * configuration the channel currently carries, which survives disable/
+ * enable, so an open at the same rate never reconfigures. s_out_running is
+ * whether the channel is enabled, as far as this file knows -- esp_codec_dev
+ * may also have enabled it for the microphone's sake, which is why an
+ * "already enabled" error on enable is treated as success. */
+static uint32_t s_out_cfg_rate;
+static bool     s_out_running;
+static bool     s_cap_open;   /* defined here so the output side can see it */
 
+/* Width of the TX channel's I2S slots RIGHT NOW. 16 when this file
+ * configured the channel. But when a capture opens with more than two
+ * channels, esp_codec_dev implements it as two 32-bit slots -- the ES7210
+ * packs its four 16-bit ADC words into a 64-bit frame -- and, because the
+ * two directions share one clock, it reconfigures the paired TX channel to
+ * 32-bit slots as well ("Peer mode playback need extend bits 32 to 64").
+ * Every 16-bit stereo frame this file writes then has to be widened to two
+ * 32-bit words or the amplifier plays it at the wrong width: heard as a
+ * garbled, muffled reply during hands-free (mic open, 4 channels) that was
+ * perfectly clear after `voice talk` (mic closed, 2 channels). */
+static uint8_t  s_out_slot_bits = 16;
+static int32_t *s_out_wide;   /* conversion buffer for the 32-bit case */
+#define AUDIO_OUT_WIDE_FRAMES  512
+static void *audio_alloc(size_t size);   /* defined with the streaming code below */
+
+#define AUDIO_OUT_PARK_RATE    16000u   /* what voice runs at, both directions */
+/* Roughly the driver's DMA ring at 16 kHz stereo 16-bit, with margin: the
+ * last thing written keeps circulating on a channel that stays enabled, so
+ * the last thing written had better be silence. */
+#define AUDIO_OUT_FLUSH_BYTES  (16u * 1024u)   /* > 6 x 240 frames x 8 B at 32-bit slots */
+
+static esp_err_t audio_out_configure(uint32_t rate)
+{
     /* Reconfiguring requires the channel to be stopped. It may already be
      * stopped, and that is not an error worth reporting. */
     (void)i2s_channel_disable(s_tx);
+    s_out_running = false;
+    s_out_cfg_rate = 0;
 
     i2s_std_clk_config_t clk = I2S_STD_CLK_DEFAULT_CONFIG(rate);
     clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
@@ -105,8 +153,44 @@ static esp_err_t audio_out_open(uint32_t rate)
                                             I2S_SLOT_MODE_STEREO);
     ESP_RETURN_ON_ERROR(i2s_channel_reconfig_std_slot(s_tx, &slot), TAG,
                         "cannot set slot format");
+    s_out_cfg_rate = rate;
+    s_out_slot_bits = 16;
 
-    return i2s_channel_enable(s_tx);
+    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx), TAG, "cannot enable TX");
+    s_out_running = true;
+    return ESP_OK;
+}
+
+static esp_err_t audio_out_open(uint32_t rate)
+{
+    if (!s_tx) {
+        void *handle = NULL;
+        if (esp_board_periph_get_handle("i2s_audio_out", &handle) != ESP_OK || !handle) {
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        s_tx = (i2s_chan_handle_t)handle;
+    }
+
+    if (s_out_cfg_rate != rate) {
+        if (s_cap_open) {
+            /* Only a WAV at an odd rate gets here; voice is all 16 kHz. */
+            ESP_LOGW(TAG, "reconfiguring the shared I2S clock %" PRIu32 " -> %" PRIu32
+                          " Hz while the microphone is open -- expect a capture hiccup",
+                     s_out_cfg_rate, rate);
+        }
+        return audio_out_configure(rate);
+    }
+
+    if (!s_out_running) {
+        const esp_err_t err = i2s_channel_enable(s_tx);
+        /* ESP_ERR_INVALID_STATE: already enabled -- esp_codec_dev did it
+         * when the microphone opened. That is the state we want. */
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            return err;
+        }
+        s_out_running = true;
+    }
+    return ESP_OK;
 }
 
 static esp_err_t audio_out_write(const void *buf, size_t bytes)
@@ -115,10 +199,69 @@ static esp_err_t audio_out_write(const void *buf, size_t bytes)
     return i2s_channel_write(s_tx, buf, bytes, &written, portMAX_DELAY);
 }
 
+/* Every producer in this file makes 16-bit interleaved stereo. This is the
+ * one place that knows what the channel currently expects (see
+ * s_out_slot_bits) and widens the frames when it has to. */
+static esp_err_t audio_out_write_stereo16(const int16_t *stereo, size_t frames)
+{
+    if (s_out_slot_bits == 16) {
+        return audio_out_write(stereo, frames * 2u * sizeof(int16_t));
+    }
+    if (!s_out_wide) {
+        s_out_wide = audio_alloc(AUDIO_OUT_WIDE_FRAMES * 2u * sizeof(int32_t));
+        if (!s_out_wide) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    for (size_t done = 0; done < frames;) {
+        const size_t n = (frames - done) > AUDIO_OUT_WIDE_FRAMES ? AUDIO_OUT_WIDE_FRAMES : (frames - done);
+        /* Interleaved stereo: frame `done` starts at sample `done * 2`.
+         * (Indexing this as `done + i` once re-read the middle of every 60 ms
+         * reply frame in place of its end -- heard as garbled-but-legible
+         * speech, only ever in hands-free mode, where the slots are wide.) */
+        const int16_t *src = stereo + done * 2u;
+        for (size_t i = 0; i < n * 2u; i++) {
+            /* The sample in the top 16 bits of the 32-bit slot: what a
+             * 16-bit DAC word looks like to an amplifier reading MSB first. */
+            s_out_wide[i] = (int32_t)src[i] << 16;
+        }
+        ESP_RETURN_ON_ERROR(audio_out_write(s_out_wide, n * 2u * sizeof(int32_t)), TAG, "i2s write");
+        done += n;
+    }
+    return ESP_OK;
+}
+
 static void audio_out_close(void)
 {
-    if (s_tx) {
-        (void)i2s_channel_disable(s_tx);
+    if (!s_tx) {
+        return;
+    }
+    /* ALWAYS leave silence in the DMA ring, whether or not the channel is
+     * about to be stopped. The I2S driver does not clear its buffers on
+     * disable, reconfigure or enable, so whatever was written last -- the
+     * tail of the beep, the end of a reply -- is still there the next time
+     * the channel runs, and the channel is run behind this file's back:
+     * esp_codec_dev enables TX whenever the microphone opens, at whatever
+     * slot width the capture needs. A 16-bit beep tail looping through
+     * 32-bit slots while the wake-word front end listens is the burst of
+     * hash heard at the start of every hands-free reply. */
+    static const uint8_t zeros[1024] = {0};
+    for (size_t left = AUDIO_OUT_FLUSH_BYTES; left > 0;) {
+        const size_t n = left < sizeof(zeros) ? left : sizeof(zeros);
+        if (audio_out_write(zeros, n) != ESP_OK) {
+            break;
+        }
+        left -= n;
+    }
+    if (s_cap_open) {
+        /* The microphone needs this clock: leave the channel running.
+         * capture_stop() finishes the shutdown once nothing needs it. */
+        return;
+    }
+    (void)i2s_channel_disable(s_tx);
+    s_out_running = false;
+    if (s_out_slot_bits != 16) {
+        s_out_cfg_rate = 0;   /* a capture widened the slots; reconfigure on the next open */
     }
 }
 
@@ -236,6 +379,17 @@ esp_err_t mpx_audio_init(void)
              mpx_audio_have_mic() ? "ready" : "absent",
              mpx_audio_have_speaker() ? "ready" : "absent");
 
+    /* Configure TX for the voice rate now, while nothing is capturing, so
+     * the first reply that arrives while the wake-word front end holds the
+     * microphone finds the clock already right and never has to stop it
+     * (see the comment above audio_out_configure()). Left running, as the
+     * board manager handed it over: esp_codec_dev bounces it when the
+     * microphone opens either way, and a running channel spares the
+     * driver's "has not been enabled yet" complaint when it does. */
+    if (s_tx) {
+        (void)audio_out_configure(AUDIO_OUT_PARK_RATE);
+    }
+
 #if !CONFIG_CODEC_DUMMY_SUPPORT
     if (!mpx_audio_have_speaker()) {
         /* Much the most likely reason, and invisible otherwise: an amplifier
@@ -274,7 +428,6 @@ int mpx_audio_get_volume(void) { return s_volume; }
  * so a caller can push frames through Opus and a socket without paying an
  * open/close per block. */
 
-static bool     s_cap_open;
 static uint8_t  s_cap_channels = 1;
 static uint8_t  s_cap_pick;
 static int16_t *s_cap_scratch;      /* interleaved, straight off the codec */
@@ -318,6 +471,17 @@ esp_err_t mpx_audio_capture_start(uint32_t sample_rate, uint8_t channels, uint8_
     s_cap_channels = channels;
     s_cap_pick = pick;
     s_cap_open = true;
+
+    /* esp_codec_dev has just reconfigured and enabled the paired TX channel
+     * to match this capture (see s_out_slot_bits): the clock is now this
+     * capture's rate, the slots are 32-bit when there are more than two
+     * channels, and the channel is running. Record that, so playback that
+     * starts while the mic is open neither reconfigures the channel (which
+     * would stop the mic's clock) nor writes 16-bit frames into 32-bit
+     * slots. */
+    s_out_cfg_rate = sample_rate;
+    s_out_slot_bits = (channels > 2) ? 32 : 16;
+    s_out_running = true;
     return ESP_OK;
 }
 
@@ -346,6 +510,39 @@ void mpx_audio_capture_stop(void)
     free(s_cap_scratch);
     s_cap_scratch = NULL;
     s_cap_open = false;
+
+    /* A playback that ended while this capture was open left TX running
+     * (see audio_out_close()); nothing needs the clock any more, so stop
+     * it the way that close would have. Not while an output stream is
+     * still open, though -- that one closes itself. */
+    if (s_tx && s_out_running && !s_out_scratch) {
+        (void)i2s_channel_disable(s_tx);
+        s_out_running = false;
+        /* The codec left TX in whatever width this capture needed; make the
+         * next open (with nothing capturing) put it back to 16-bit. If an
+         * output stream is open right now it keeps the current width until
+         * it closes, and the same reset happens on its next open. */
+        s_out_cfg_rate = 0;
+    }
+}
+
+bool mpx_audio_capture_active(void) { return s_cap_open; }
+
+uint8_t mpx_audio_capture_channels(void) { return s_cap_channels; }
+
+esp_err_t mpx_audio_capture_read_raw(int16_t *interleaved, size_t frames)
+{
+    ESP_RETURN_ON_FALSE(s_cap_open, ESP_ERR_INVALID_STATE, TAG, "capture not started");
+    ESP_RETURN_ON_FALSE(interleaved && frames && frames <= MPX_AUDIO_MAX_FRAMES,
+                        ESP_ERR_INVALID_ARG, TAG, "bad frame count");
+
+    /* Same read as mpx_audio_capture_read(), straight into the caller's
+     * buffer instead of s_cap_scratch -- there is no picking to do, so no
+     * reason to bounce through the scratch buffer first. */
+    const int bytes = (int)(frames * s_cap_channels * sizeof(int16_t));
+    const int rc = esp_codec_dev_read(s_mic->codec_dev, interleaved, bytes);
+    ESP_RETURN_ON_FALSE(rc == 0, ESP_FAIL, TAG, "read failed: rc=%d", rc);
+    return ESP_OK;
 }
 
 esp_err_t mpx_audio_output_start(uint32_t sample_rate)
@@ -373,7 +570,7 @@ esp_err_t mpx_audio_output_write(const int16_t *mono, size_t frames)
         s_out_scratch[i * 2]     = v;
         s_out_scratch[i * 2 + 1] = v;
     }
-    return audio_out_write(s_out_scratch, frames * 2u * sizeof(int16_t));
+    return audio_out_write_stereo16(s_out_scratch, frames);
 }
 
 void mpx_audio_output_stop(void)
@@ -403,6 +600,11 @@ esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
 
     ESP_RETURN_ON_FALSE(mpx_audio_have_mic(), ESP_ERR_NOT_SUPPORTED, TAG,
                         "no microphone on this board");
+    /* The streaming capture (wake word, `voice talk`) is the same hardware
+     * stream; opening the codec a second time underneath it interleaves two
+     * readers, which is not an error anyone gets told about. */
+    ESP_RETURN_ON_FALSE(!s_cap_open, ESP_ERR_INVALID_STATE, TAG,
+                        "microphone busy -- `wake auto off` (or `wake stop`) first");
     ESP_RETURN_ON_FALSE(channels >= 1 && channels <= 4, ESP_ERR_INVALID_ARG,
                         TAG, "channels must be 1-4");
     ESP_RETURN_ON_FALSE(pick < channels, ESP_ERR_INVALID_ARG, TAG,
@@ -591,7 +793,7 @@ esp_err_t mpx_audio_play_tone(uint32_t hz, uint32_t seconds)
                 phase = 0;
             }
         }
-        ret = audio_out_write(buf, frames_per_chunk * 2u * sizeof(int16_t));
+        ret = audio_out_write_stereo16(buf, frames_per_chunk);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "i2s write failed: %s", esp_err_to_name(ret));
             goto cleanup;
@@ -673,7 +875,7 @@ esp_err_t mpx_audio_play_wav(const char *rel_path)
             out_buf[i * 2 + 1] = (int16_t)(r * s_volume / 100);
         }
 
-        ret = audio_out_write(out_buf, frames * 2u * sizeof(int16_t));
+        ret = audio_out_write_stereo16(out_buf, frames);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "i2s write failed: %s", esp_err_to_name(ret));
             goto cleanup;
@@ -749,6 +951,15 @@ esp_err_t mpx_audio_capture_read(int16_t *mono, size_t frames)
 }
 
 void mpx_audio_capture_stop(void) { }
+
+bool mpx_audio_capture_active(void) { return false; }
+uint8_t mpx_audio_capture_channels(void) { return 0; }
+
+esp_err_t mpx_audio_capture_read_raw(int16_t *interleaved, size_t frames)
+{
+    (void)interleaved; (void)frames;
+    return ESP_ERR_NOT_SUPPORTED;
+}
 
 esp_err_t mpx_audio_output_start(uint32_t sample_rate)
 {

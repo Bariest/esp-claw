@@ -429,7 +429,7 @@ bool init()
         } else {
             ESP_LOGW(TAG, "Servo probe FAILED — no driver board responded");
             ESP_LOGW(TAG, "Check: battery voltage on the servo connectors, "
-                          "SPI3 wiring (MOSI=6 MISO=17 CLK=16), and AT32 "
+                          "SPI2 wiring (MOSI=6 MISO=17 CLK=16, CS 15/7/4/5), and AT32 "
                           "board firmware");
         }
     }

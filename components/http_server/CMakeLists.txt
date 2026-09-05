@@ -84,6 +84,16 @@ idf_component_register(
 )
 
 # Rebuild the component whenever the bundled UI asset changes on disk.
+# mpx_mcp_ws (the xiaozhi MCP bridge) is a managed-manifest component gated on
+# MP4_ROBOT_ENABLE, and http_server_webim_api.c includes its header to mirror
+# the onboard agent's replies to it. Appending it to the REQUIRES list inside
+# the if(CONFIG_MP4_ROBOT_ENABLE) block above was not enough -- the build
+# still reported it missing from this component's requirements -- so it is
+# attached the way mpx_voice_wake attaches esp-sr: after registration, only
+# if it is in the build. See components/mpx_voice_wake/CMakeLists.txt for the
+# long version of why.
+idf_component_optional_requires(PRIVATE mpx_mcp_ws)
+
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FRONTEND_DIST_HTML_GZ}")
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-missing-field-initializers)

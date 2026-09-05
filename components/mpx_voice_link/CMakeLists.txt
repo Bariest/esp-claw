@@ -5,6 +5,7 @@ idf_component_register(
         "src/mpx_voice_codec.cc"
         "src/mpx_voice_ws.c"
         "src/mpx_voice_ota.c"
+        "src/mpx_voice_stream.c"
         "src/mpx_voice_cmd.c"
     INCLUDE_DIRS
         "include"

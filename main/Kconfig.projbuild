@@ -162,20 +162,106 @@ menu "MP4 Robot"
             drives pins that belong to something else.
 
     config MP4_VOICE_ENABLE
-        bool "Offline voice: wake word and command recognition"
+        bool "Voice: wake word, echo cancellation and the cloud voice link"
         depends on MP4_ROBOT_ENABLE
         default y
         help
-            Pull in esp-sr and run its acoustic front end, WakeNet and
-            MultiNet on the ES7210 microphones.
+            Pull in esp-sr and run its acoustic front end (AEC + VAD +
+            WakeNet, "Hi ESP") on the ES7210 microphones, plus the Opus /
+            WebSocket link to the xiaozhi voice server.
 
-            This is command recognition, not dictation: MultiNet matches a
-            fixed list of phrases compiled into the firmware. Free-form
-            speech needs a cloud transcription service, which this does not
-            include.
+            Cloud-as-brain (docs/voice-plan.md, option A): transcription
+            and the reply both happen server-side. No on-device command
+            recognition (MultiNet) is built.
+
+    config MP4_VOICE_AUTO_LISTEN
+        bool "Hands-free from boot: listen for the wake word, then converse"
+        depends on MP4_VOICE_ENABLE
+        default y
+        help
+            Start the hands-free loop at boot (mpx_voice_wake_auto_start()):
+            listen for "Hi ESP", beep, stream what you say until the server
+            decides you have finished, play the reply, listen again.
+
+            The microphone is open continuously while this is on, so
+            `voice talk` refuses to start; use `wake auto off` for the manual
+            commands. The device still has to be provisioned once with
+            `voice provision`.
+
+    config MP4_VOICE_AUTO_MAX_SECONDS
+        int "Hands-free: give up listening after this many seconds of nothing"
+        depends on MP4_VOICE_ENABLE
+        range 3 60
+        default 12
+        help
+            In hands-free mode the server's VAD normally ends the listen. If
+            it never does -- you said the wake word and then nothing, or the
+            socket went quiet -- the microphone is released after this long
+            and the wake word is listened for again.
+
+            Depends on MP4_VOICE_ENABLE rather than MP4_VOICE_AUTO_LISTEN on
+            purpose: `wake auto on` from the console works even when the
+            boot default is off, and needs this value then too.
 
             The models live in the "model" partition, which exists only in
             partitions_16MB.csv. A board with less flash cannot hold them.
+
+    config MP4_MCP_GROUPS
+        string "Capability groups offered to the cloud voice model over MCP"
+        depends on MP4_ROBOT_ENABLE
+        default "cap_display cap_robot cap_mpx_skill"
+        help
+            Space-separated claw_cap group ids (see `mcp info` on the console
+            for names and counts). Empty means every group the on-device
+            agent can call -- about 60 tools, which is more than the cloud
+            model copes with: the session that exposed everything is the
+            one where it stopped calling tools at all.
+
+            The default is the split that keeps voice snappy: only the
+            quick, direct things (the screen, the robot's moves, the MPX
+            skills -- a dozen tools) are offered as tools the cloud model
+            calls itself. Everything else -- Lua, files, the scheduler,
+            web search, system info -- it reaches through ask_robot_agent,
+            which hands the request to the onboard ESP-Claw agent that has
+            those capabilities AND knows how to use them. Fewer schemas per
+            turn for xiaozhi's model; the heavy lifting on the robot's own
+            agent. Add groups here (e.g. cap_lua cap_files cap_system
+            cap_scheduler cap_web_search cap_http_request) to let the cloud
+            model call them directly instead.
+
+    config MP4_PI_LINK_ENABLE
+        bool "Raspberry Pi UART link on the J-PI header"
+        depends on MP4_ROBOT_ENABLE
+        default y
+        help
+            Opens UART1 on the two J-PI header GPIOs below and registers the
+            `pi` console command (`pi status` says CONNECTED / NOT CONNECTED).
+            The Pi runs tools/pi/mp4_link.py. See tools/pi/README.md for the
+            wiring and the Pi-side setup.
+
+    config MP4_PI_LINK_TX_GPIO
+        int "  ESP TX -> Pi RXD (GPIO15, header pin 10)"
+        depends on MP4_PI_LINK_ENABLE
+        range 0 48
+        default 18
+        help
+            Default 18 = schematic net IO18_PI_1 on the J-PI header.
+            GPIO3 (PI_3) is avoided: it is an ESP32-S3 strapping pin.
+
+    config MP4_PI_LINK_RX_GPIO
+        int "  ESP RX <- Pi TXD (GPIO14, header pin 8)"
+        depends on MP4_PI_LINK_ENABLE
+        range 0 48
+        default 8
+        help
+            Default 8 = schematic net IO8_PI_2 on the J-PI header.
+
+    config MP4_PI_LINK_BAUD
+        int "  Baud rate"
+        depends on MP4_PI_LINK_ENABLE
+        default 115200
+        help
+            Must match --baud on the Pi side (mp4_link.py defaults to 115200).
 
     config MP4_GATEWAY_HOST
         string "Skill marketplace gateway host"

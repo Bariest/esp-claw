@@ -23,8 +23,19 @@ static void voice_usage(void)
            "  voice provision [ota-url]    ask the cloud where to connect\n"
            "  voice connect [url] [token]  open the websocket (no args = provisioned)\n"
            "  voice disconnect             close it\n"
+           "  voice talk [secs]            push-to-talk: stream mic to the cloud (0 = until `voice talk stop`)\n"
+           "  voice talk auto              like hands-free, minus the wake word: the server ends the listen\n"
+           "  voice talk stop              stop a running `voice talk`\n"
            "  voice send <json>            send one raw control message\n"
            "  voice info                   link state, session, frame sizes\n"
+           "\n"
+           "`voice talk` is Phase 2b's gate: it needs `voice connect` to have\n"
+           "already produced a ready session. It opens the microphone, sends\n"
+           "listen/start, streams Opus frames out over the socket the whole\n"
+           "time, then closes the microphone and sends listen/stop -- manual\n"
+           "mode, so the server does not run ASR until that stop arrives. Any\n"
+           "reply audio the server sends back plays automatically as it\n"
+           "arrives; nothing else needs to be run for that.\n"
            "\n"
            "The websocket URL is NOT something you type. The device asks the\n"
            "OTA endpoint and is told where to connect and with what token, so\n"
@@ -113,6 +124,40 @@ static int voice_cmd(int argc, char **argv)
                MPX_VOICE_UPLINK_RATE, MPX_VOICE_UPLINK_FRAME, MPX_VOICE_FRAME_MS);
         printf("  downlink     : %d Hz, %d frames per %d ms\n",
                MPX_VOICE_DOWNLINK_RATE, MPX_VOICE_DOWNLINK_FRAME, MPX_VOICE_FRAME_MS);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "talk") == 0) {
+        if (argc >= 3 && strcmp(argv[2], "stop") == 0) {
+            if (!mpx_voice_talk_active()) {
+                printf("  not talking\n");
+                return 0;
+            }
+            mpx_voice_talk_stop();
+            return 0;
+        }
+        if (argc >= 3 && strcmp(argv[2], "auto") == 0) {
+            /* The same listen the wake word triggers, started by hand: the
+             * server's VAD decides when you have finished. Proves the
+             * server side of hands-free without needing WakeNet to hear
+             * anything. Needs the mic free (`wake auto off`). */
+            const esp_err_t err = mpx_voice_talk_start_auto(12);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "talk failed: %s", esp_err_to_name(err));
+                return 1;
+            }
+            printf("  listening -- just speak; stops when the server answers (12 s max)\n");
+            return 0;
+        }
+        const uint32_t secs = (argc >= 3) ? (uint32_t)atoi(argv[2]) : 8;
+        const esp_err_t err = mpx_voice_talk_start(secs);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "talk failed: %s", esp_err_to_name(err));
+            return 1;
+        }
+        if (secs == 0) {
+            printf("  talking -- run `voice talk stop` when done\n");
+        }
         return 0;
     }
 

@@ -127,6 +127,7 @@ static uint32_t    s_to_color;
 static int32_t     s_morph = 1000;  /* 0 = at `from`, 1000 = at `to`         */
 static int32_t     s_open  = 1000;  /* 1000 = eyes open, 0 = fully closed    */
 static bool        s_blinks = true;
+static uint32_t    s_background = 0x000000;   /* survives a rebuild of the screen */
 
 static int32_t lerp(int32_t a, int32_t b, int32_t t)
 {
@@ -245,7 +246,7 @@ static esp_err_t face_build_locked(void)
     if (!s_screen) {
         return ESP_ERR_NO_MEM;
     }
-    lv_obj_set_style_bg_color(s_screen, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_screen, lv_color_hex(s_background), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_screen, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(s_screen, 0, LV_PART_MAIN);
@@ -382,5 +383,31 @@ esp_err_t cap_display_face_set_status(const char *text)
         lv_label_set_text(s_status, buf);
     }
     display_service_unlock();
+    return ESP_OK;
+}
+
+esp_err_t cap_display_face_set_colors(int32_t background_rgb, int32_t eyes_rgb)
+{
+    if (display_service_lock() != ESP_OK) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (face_build_locked() != ESP_OK) {
+        display_service_unlock();
+        return ESP_ERR_NO_MEM;
+    }
+    if (background_rgb >= 0) {
+        s_background = (uint32_t)background_rgb & 0xFFFFFF;
+        lv_obj_set_style_bg_color(s_screen, lv_color_hex(s_background), LV_PART_MAIN);
+    }
+    if (eyes_rgb >= 0) {
+        /* Jump straight there rather than morphing: a colour request reads
+         * as "now", and the running blink/morph animation keeps working on
+         * the shapes regardless. */
+        s_from_color = s_to_color = (uint32_t)eyes_rgb & 0xFFFFFF;
+        face_render();
+    }
+    display_service_unlock();
+    ESP_LOGI(TAG, "colours: background #%06X eyes %s", (unsigned)s_background,
+             eyes_rgb >= 0 ? "set" : "unchanged");
     return ESP_OK;
 }

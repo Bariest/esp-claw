@@ -10,4 +10,5 @@ idf_component_register(
         esp_board_manager
         esp_driver_ledc
         esp_hw_support
+        esp_timer
 )

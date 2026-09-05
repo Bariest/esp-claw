@@ -17,6 +17,7 @@
 
 #include "cJSON.h"
 #include "esp_check.h"
+#include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -42,6 +43,22 @@ static char s_session_id[VOICE_SESSION_ID_MAX];
 static uint32_t s_downlink_rate = MPX_VOICE_DOWNLINK_RATE;
 static SemaphoreHandle_t s_handshake;
 static uint32_t s_audio_frames;
+static mpx_voice_mcp_sink_t s_mcp_sink;
+static mpx_voice_ui_hooks_t s_ui;   /* zeroed = no hooks */
+
+void mpx_voice_set_mcp_sink(mpx_voice_mcp_sink_t sink)
+{
+    s_mcp_sink = sink;
+}
+
+void mpx_voice_set_ui_hooks(const mpx_voice_ui_hooks_t *hooks)
+{
+    if (hooks) {
+        s_ui = *hooks;
+    } else {
+        memset(&s_ui, 0, sizeof(s_ui));
+    }
+}
 
 /* Whether the WebSocket upgrade ever completed. The distinction matters when
  * reporting a failure: "the server never accepted the upgrade" and "the
@@ -59,6 +76,21 @@ esp_err_t mpx_voice_send_json(const char *json)
     const int sent = esp_websocket_client_send_text(s_client, json, len,
                                                     pdMS_TO_TICKS(2000));
     ESP_RETURN_ON_FALSE(sent == len, ESP_FAIL, TAG, "send failed (%d of %d)", sent, len);
+    return ESP_OK;
+}
+
+esp_err_t mpx_voice_send_binary(const uint8_t *data, size_t len)
+{
+    ESP_RETURN_ON_FALSE(s_client && data && len, ESP_ERR_INVALID_STATE, TAG, "not connected");
+
+    /* Same call as send_text -- esp_websocket_client picks the frame opcode
+     * (binary vs. text) from which of the two functions you call, not from
+     * the bytes. Uplink Opus packets go out as 0x02 this way, matching what
+     * the server sends us and what voice_ws_event's op_code check expects. */
+    const int sent = esp_websocket_client_send_bin(s_client, (const char *)data, (int)len,
+                                                    pdMS_TO_TICKS(2000));
+    ESP_RETURN_ON_FALSE(sent == (int)len, ESP_FAIL, TAG, "binary send failed (%d of %u)",
+                        sent, (unsigned)len);
     return ESP_OK;
 }
 
@@ -147,23 +179,74 @@ static void voice_handle_text(const char *data, int len)
         const cJSON *text = cJSON_GetObjectItem(root, "text");
         ESP_LOGI(TAG, "heard: %s",
                  cJSON_IsString(text) ? text->valuestring : "(no text)");
+        if (s_ui.heard && cJSON_IsString(text)) {
+            s_ui.heard(text->valuestring);
+        }
+        /* A transcript means the server's VAD has closed the utterance --
+         * an auto-mode talk should stop streaming now, not keep feeding it
+         * the room (and, in a moment, its own reply). */
+        mpx_voice_stream_on_server_turn();
     } else if (strcmp(kind, "tts") == 0) {
         const cJSON *state = cJSON_GetObjectItem(root, "state");
         const cJSON *text = cJSON_GetObjectItem(root, "text");
-        ESP_LOGI(TAG, "tts %s%s%s",
-                 cJSON_IsString(state) ? state->valuestring : "?",
+        const char *state_str = cJSON_IsString(state) ? state->valuestring : "?";
+        ESP_LOGI(TAG, "tts %s%s%s", state_str,
                  cJSON_IsString(text) ? ": " : "",
                  cJSON_IsString(text) ? text->valuestring : "");
+        /* "stop" means the server is done sending this reply's audio -- tell
+         * the streaming layer so it closes the speaker instead of leaving
+         * I2S open with nothing feeding it until the next reply. Anything
+         * else ("start", "sentence_start") means the reply has begun, which
+         * is the other way an auto-mode talk learns the server took its
+         * turn -- some servers send tts start before, or instead of, stt. */
+        if (strcmp(state_str, "stop") == 0) {
+            mpx_voice_stream_on_tts_stop();
+            if (s_ui.reply_done) {
+                s_ui.reply_done();
+            }
+        } else {
+            mpx_voice_stream_on_server_turn();
+            if (s_ui.saying && strcmp(state_str, "sentence_start") == 0 && cJSON_IsString(text)) {
+                s_ui.saying(text->valuestring);
+            }
+        }
     } else if (strcmp(kind, "llm") == 0) {
-        /* Emotion hints. Phase 5 maps these onto the face; logging them now
-         * shows what the server actually sends. */
+        /* Emotion hints -- Phase 5 puts them on the face through the hook. */
         const cJSON *emotion = cJSON_GetObjectItem(root, "emotion");
         ESP_LOGI(TAG, "emotion: %s",
                  cJSON_IsString(emotion) ? emotion->valuestring : "(none)");
+        if (s_ui.emotion && cJSON_IsString(emotion)) {
+            s_ui.emotion(emotion->valuestring);
+        }
     } else if (strcmp(kind, "mcp") == 0) {
-        /* Phase 3. Logged rather than handled so the payload shape can be
-         * seen before anything is written against it. */
-        ESP_LOGI(TAG, "mcp message received (%d bytes) -- not handled yet", len);
+        /* Phase 3. `payload` is the raw JSON-RPC message; mpx_mcp_ws (if it
+         * has registered itself) owns everything past this point, including
+         * the reply -- see mpx_voice_set_mcp_sink() in the header for why
+         * this component does not call into it directly. */
+        const cJSON *payload = cJSON_GetObjectItem(root, "payload");
+        if (!cJSON_IsObject(payload)) {
+            ESP_LOGW(TAG, "mcp message with no payload object (%d bytes)", len);
+        } else if (!s_mcp_sink) {
+            ESP_LOGW(TAG, "mcp message received but no MCP bridge is registered "
+                          "-- mpx_mcp_ws_init() not called?");
+        } else {
+            char *json = cJSON_PrintUnformatted(payload);
+            if (json) {
+                s_mcp_sink(json);
+            }
+        }
+    } else if (strcmp(kind, "goodbye") == 0) {
+        /* The server is ending the conversation -- after you said goodbye,
+         * or after its own idle timeout (it says "bye" out loud first, then
+         * sends this, then closes the socket). Nothing to send back; the
+         * DISCONNECTED event that follows is what moves the state. Logged
+         * loudly because from the outside it looks like the robot stopped
+         * listening for no reason. */
+        ESP_LOGW(TAG, "server ended the session (goodbye) -- the next turn needs the wake word");
+        if (s_ui.session_ended) {
+            s_ui.session_ended();
+        }
+        s_state = MPX_VOICE_IDLE;
     } else {
         ESP_LOGI(TAG, "<- %.*s", len > 200 ? 200 : len, data);
     }
@@ -190,15 +273,19 @@ static void voice_ws_event(void *arg, esp_event_base_t base,
         case WEBSOCKET_EVENT_DATA:
             if (ev->op_code == 0x01 && ev->data_len > 0) {
                 voice_handle_text(ev->data_ptr, ev->data_len);
-            } else if (ev->op_code == 0x02) {
-                /* Opus from the server. Counted only, until the playback path
-                 * is wired up -- decoding here would be on the websocket
-                 * task's stack, which is nowhere near the 26 KB Opus wants. */
+            } else if (ev->op_code == 0x02 && ev->data_len > 0) {
+                /* Opus from the server. Copied onto mpx_voice_stream's own
+                 * queue and decoded on its own task, never here -- decoding
+                 * inline would run on the websocket client's task stack,
+                 * nowhere near the ~26 KB Opus wants (see the file header of
+                 * mpx_voice_stream.c; this is the same crash the loopback
+                 * codec test was built to avoid). */
                 s_audio_frames++;
                 if ((s_audio_frames % 25u) == 0) {
                     ESP_LOGI(TAG, "%" PRIu32 " audio frames received",
                              s_audio_frames);
                 }
+                mpx_voice_stream_rx_frame((const uint8_t *)ev->data_ptr, (size_t)ev->data_len);
             }
             break;
 
@@ -271,6 +358,13 @@ esp_err_t mpx_voice_connect(const char *url, const char *token)
          * caller's back, and during bring-up a connection that silently comes
          * back hides the reason it dropped. */
         .disable_auto_reconnect = true,
+        /* wss:// needs a server-verification option or esp-tls refuses to set
+         * up the TLS session at all (ESP_ERR_MBEDTLS_SSL_SETUP_FAILED, before
+         * a single byte goes on the wire). mpx_voice_ota.c already attaches
+         * the IDF cert bundle for the OTA HTTPS call; the websocket needs the
+         * same thing for the same reason -- it's a different esp-tls caller,
+         * not a different problem. */
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     s_client = esp_websocket_client_init(&cfg);

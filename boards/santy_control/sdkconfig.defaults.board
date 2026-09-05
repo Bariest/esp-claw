@@ -35,12 +35,25 @@ CONFIG_MP4_ROBOT_ENABLE=y
 # No servo harness on this board -- see board_devices.yaml. Without this,
 # driver_board_init() would claim SPI3 and four chip-select GPIOs that belong
 # to the camera connector.
-CONFIG_MP4_ROBOT_SERVO_ENABLE=n
+CONFIG_MP4_ROBOT_SERVO_ENABLE=y
 
-# esp-sr stays off until Phase 4 of docs/voice-plan.md. It builds fine here
-# (the model partition exists), but it is a several-hundred-MB first build
-# and nothing uses it yet.
-CONFIG_MP4_VOICE_ENABLE=n
+# Phase 4 of docs/voice-plan.md (components/mpx_voice_wake): AEC + VAD +
+# WakeNet for barge-in. Only the wake and VAD models are selected below --
+# MultiNet (on-device fixed-phrase command matching) is left out on purpose.
+# This board's voice architecture is Option A, cloud-as-brain (see
+# docs/voice-plan.md's "What stays and what goes"): nothing here does
+# on-device command recognition, the cloud's ASR does all transcription, so
+# MultiNet would be ~2.1 MB of the 2904K model partition spent on a
+# capability nothing calls.
+CONFIG_MP4_VOICE_ENABLE=y
+
+# ---- esp-sr models (see CONFIG_MP4_VOICE_ENABLE above) -----------------
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_WN_WN9_HIESP=y            # wake word: "Hi ESP", ~296K
+CONFIG_SR_VADN_VADNET1_MEDIUM=y     # neural VAD (AFE's vad_init), ~292K
+CONFIG_SR_NSN_WEBRTC=y              # classic NS, no flash model of its own
+CONFIG_SR_MN_EN_NONE=y              # no on-device command matching -- see above
+CONFIG_SR_MN_CN_NONE=y
 
 # ---- Audio codecs ----------------------------------------------------
 #
